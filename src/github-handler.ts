@@ -25,11 +25,15 @@ interface PendingAuth {
   };
   oauthRequest: AuthRequest;
   completedProviders: string[];
-  requestedScopes: string[];
+  requestedProvider?: string;
+  existingProps?: Props; // For incremental auth
 }
 
 const app = new Hono<{ Bindings: Env & { OAUTH_PROVIDER: OAuthHelpers } }>();
 
+/**
+ * Authorization endpoint - handles both initial auth and incremental auth
+ */
 app.get("/authorize", async (c) => {
   const oauthReqInfo = await c.env.OAUTH_PROVIDER.parseAuthRequest(c.req.raw);
   const { clientId } = oauthReqInfo;
@@ -37,11 +41,22 @@ app.get("/authorize", async (c) => {
     return c.text("Invalid request", 400);
   }
 
+  // Check for specific provider request (incremental auth)
+  const requestedProvider = c.req.query("provider");
+  const context = c.req.query("context");
+
   // Check if client is already approved
   if (await isClientApproved(c.req.raw, clientId, env.COOKIE_ENCRYPTION_KEY)) {
     // Skip approval dialog but still create secure state and bind to session
     const { stateToken } = await createOAuthState(oauthReqInfo, c.env.OAUTH_KV);
     const { setCookie: sessionBindingCookie } = await bindStateToSession(stateToken);
+
+    // If specific provider requested, go directly to that provider
+    if (requestedProvider === "gmail") {
+      return redirectToGmail(c.req.raw, stateToken, oauthReqInfo, { "Set-Cookie": sessionBindingCookie });
+    }
+
+    // Default to GitHub
     return redirectToGithub(c.req.raw, stateToken, { "Set-Cookie": sessionBindingCookie });
   }
 
@@ -52,23 +67,32 @@ app.get("/authorize", async (c) => {
   const requestedScopes = oauthReqInfo.scope;
   const integrations = [];
 
-  if (requestedScopes.includes("github") || requestedScopes.length === 0) {
-    integrations.push("GitHub");
-  }
-  if (requestedScopes.includes("gmail")) {
+  if (requestedProvider === "gmail") {
     integrations.push("Gmail");
+  } else if (requestedProvider === "github") {
+    integrations.push("GitHub");
+  } else {
+    // Default flow - GitHub first
+    integrations.push("GitHub");
+    if (requestedScopes.includes("gmail")) {
+      integrations.push("Gmail (after GitHub)");
+    }
   }
+
+  const description = requestedProvider
+    ? `Connect your ${requestedProvider.charAt(0).toUpperCase() + requestedProvider.slice(1)} account to use additional features.`
+    : `This MCP Server will connect to: ${integrations.join(", ")}`;
 
   return renderApprovalDialog(c.req.raw, {
     client: await c.env.OAUTH_PROVIDER.lookupClient(clientId),
     csrfToken,
     server: {
-      description: `This MCP Server will connect to: ${integrations.join(", ")}`,
+      description,
       logo: "https://avatars.githubusercontent.com/u/314135?s=200&v=4",
       name: "Multi-Integration MCP Server",
     },
     setCookie,
-    state: { oauthReqInfo },
+    state: { oauthReqInfo, requestedProvider },
   });
 });
 
@@ -86,7 +110,7 @@ app.post("/authorize", async (c) => {
       return c.text("Missing state in form data", 400);
     }
 
-    let state: { oauthReqInfo?: AuthRequest };
+    let state: { oauthReqInfo?: AuthRequest; requestedProvider?: string };
     try {
       state = JSON.parse(atob(encodedState));
     } catch (_e) {
@@ -109,13 +133,17 @@ app.post("/authorize", async (c) => {
     headers.append("Set-Cookie", approvedClientCookie);
     headers.append("Set-Cookie", sessionBindingCookie);
 
+    // Redirect to the appropriate provider
+    if (state.requestedProvider === "gmail") {
+      return redirectToGmail(c.req.raw, stateToken, state.oauthReqInfo, Object.fromEntries(headers));
+    }
+
     return redirectToGithub(c.req.raw, stateToken, Object.fromEntries(headers));
   } catch (error: any) {
     console.error("POST /authorize error:", error);
     if (error instanceof OAuthError) {
       return error.toResponse();
     }
-    // Unexpected non-OAuth error
     return c.text(`Internal server error: ${error.message}`, 500);
   }
 });
@@ -127,7 +155,7 @@ async function redirectToGithub(request: Request, stateToken: string, headers: R
       location: getUpstreamAuthorizeUrl({
         client_id: env.GITHUB_CLIENT_ID,
         redirect_uri: new URL("/callback", request.url).href,
-        scope: "read:user",
+        scope: "read:user user:email",
         state: stateToken,
         upstream_url: "https://github.com/login/oauth/authorize",
       }),
@@ -136,13 +164,38 @@ async function redirectToGithub(request: Request, stateToken: string, headers: R
   });
 }
 
+async function redirectToGmail(request: Request, stateToken: string, oauthReqInfo: AuthRequest, headers: Record<string, string> = {}) {
+  // Store the OAuth request info for Gmail-only flow
+  const pendingKey = crypto.randomUUID();
+  const pendingAuth: PendingAuth = {
+    githubToken: "", // Empty for Gmail-only flow
+    userData: { login: "", name: "", email: "" },
+    oauthRequest: oauthReqInfo,
+    completedProviders: [],
+    requestedProvider: "gmail",
+  };
+
+  await env.OAUTH_KV.put(`pending:${pendingKey}`, JSON.stringify(pendingAuth), { expirationTtl: 600 });
+
+  return new Response(null, {
+    headers: {
+      ...headers,
+      location: getUpstreamAuthorizeUrl({
+        client_id: env.GOOGLE_CLIENT_ID,
+        redirect_uri: new URL("/callback/gmail", request.url).href,
+        scope: "https://www.googleapis.com/auth/gmail.modify",
+        state: pendingKey,
+        upstream_url: "https://accounts.google.com/o/oauth2/v2/auth",
+        access_type: "offline",
+        prompt: "consent",
+      }),
+    },
+    status: 302,
+  });
+}
+
 /**
  * OAuth Callback Endpoint - Step 1: GitHub Authentication
- *
- * This route handles the callback from GitHub after user authentication.
- * It checks if additional OAuth providers are needed and either:
- * 1. Redirects to the next provider (e.g., Gmail)
- * 2. Completes the authorization flow with all tokens
  */
 app.get("/callback", async (c) => {
   // Validate OAuth state with session binding
@@ -178,7 +231,7 @@ app.get("/callback", async (c) => {
   const user = await new Octokit({ auth: accessToken }).rest.users.getAuthenticated();
   const { login, name, email } = user.data;
 
-  // Check if Gmail integration is requested
+  // Check if Gmail integration is requested in scopes
   const requestedScopes = oauthReqInfo.scope;
   const needsGmail = requestedScopes.includes("gmail");
 
@@ -190,10 +243,8 @@ app.get("/callback", async (c) => {
       userData: { login, name: name || login, email: email || "" },
       oauthRequest: oauthReqInfo,
       completedProviders: ["github"],
-      requestedScopes,
     };
 
-    // Store for 10 minutes
     await c.env.OAUTH_KV.put(`pending:${pendingKey}`, JSON.stringify(pendingAuth), { expirationTtl: 600 });
 
     // Redirect to Gmail OAuth
@@ -203,7 +254,6 @@ app.get("/callback", async (c) => {
       scope: "https://www.googleapis.com/auth/gmail.modify",
       state: pendingKey,
       upstream_url: "https://accounts.google.com/o/oauth2/v2/auth",
-      // Request offline access to get refresh token
       access_type: "offline",
       prompt: "consent",
     });
@@ -217,7 +267,7 @@ app.get("/callback", async (c) => {
     });
   }
 
-  // No additional providers needed, complete authorization
+  // No additional providers needed, complete authorization with GitHub only
   return completeAuthorization(c, {
     accessToken,
     login,
@@ -226,14 +276,12 @@ app.get("/callback", async (c) => {
     clearSessionCookie,
     oauthReqInfo,
     connectedIntegrations: ["github"],
+    workerUrl: new URL(c.req.url).origin,
   });
 });
 
 /**
- * Gmail OAuth Callback - Step 2: Gmail Authentication
- *
- * This handles the callback from Google after Gmail authorization.
- * It retrieves the stored GitHub data and completes the full authorization.
+ * Gmail OAuth Callback - Handles both incremental auth and initial multi-provider flow
  */
 app.get("/callback/gmail", async (c) => {
   const pendingKey = c.req.query("state");
@@ -261,12 +309,11 @@ app.get("/callback/gmail", async (c) => {
   });
   if (errResponse) return errResponse;
 
-  // Parse the Gmail token response (it includes refresh_token)
+  // Parse the Gmail token response
   let gmailAccessToken: string;
   let gmailRefreshToken: string | undefined;
 
-  if (typeof gmailTokenResponse === "string") {
-    // Parse the response to extract tokens
+  if (typeof gmailTokenResponse === "string" && gmailTokenResponse.startsWith("{")) {
     const tokenData = JSON.parse(gmailTokenResponse);
     gmailAccessToken = tokenData.access_token;
     gmailRefreshToken = tokenData.refresh_token;
@@ -277,7 +324,24 @@ app.get("/callback/gmail", async (c) => {
   // Clean up pending auth
   await c.env.OAUTH_KV.delete(`pending:${pendingKey}`);
 
-  // Complete authorization with both GitHub and Gmail tokens
+  // Check if this is an incremental auth (adding Gmail to existing session)
+  const isIncrementalAuth = pending.requestedProvider === "gmail";
+
+  if (isIncrementalAuth) {
+    // This is adding Gmail to an existing authenticated session
+    // We need to update the existing token with Gmail credentials
+
+    // For incremental auth, we need to trigger a re-authorization flow
+    // that merges the new Gmail token with existing credentials
+    return completeIncrementalAuth(c, {
+      gmailAccessToken,
+      gmailRefreshToken,
+      oauthReqInfo: pending.oauthRequest,
+      workerUrl: new URL(c.req.url).origin,
+    });
+  }
+
+  // Complete multi-provider authorization (GitHub + Gmail)
   return completeAuthorization(c, {
     accessToken: pending.githubToken,
     login: pending.userData.login,
@@ -285,14 +349,15 @@ app.get("/callback/gmail", async (c) => {
     email: pending.userData.email,
     gmailAccessToken,
     gmailRefreshToken,
-    clearSessionCookie: "", // Already cleared in first callback
+    clearSessionCookie: "",
     oauthReqInfo: pending.oauthRequest,
     connectedIntegrations: ["github", "gmail"],
+    workerUrl: new URL(c.req.url).origin,
   });
 });
 
 /**
- * Helper function to complete the OAuth authorization flow
+ * Complete standard authorization flow
  */
 async function completeAuthorization(
   c: any,
@@ -306,17 +371,26 @@ async function completeAuthorization(
     clearSessionCookie: string;
     oauthReqInfo: AuthRequest;
     connectedIntegrations: string[];
+    workerUrl: string;
   },
 ) {
-  const { accessToken, login, name, email, gmailAccessToken, gmailRefreshToken, clearSessionCookie, oauthReqInfo, connectedIntegrations } =
-    params;
+  const {
+    accessToken,
+    login,
+    name,
+    email,
+    gmailAccessToken,
+    gmailRefreshToken,
+    clearSessionCookie,
+    oauthReqInfo,
+    connectedIntegrations,
+    workerUrl,
+  } = params;
 
-  // Return back to the MCP client a new token with all auth data
   const { redirectTo } = await c.env.OAUTH_PROVIDER.completeAuthorization({
     metadata: {
       label: `${name} (${connectedIntegrations.join(", ")})`,
     },
-    // This will be available on this.props inside MyMCP
     props: {
       accessToken,
       email,
@@ -325,13 +399,13 @@ async function completeAuthorization(
       gmailAccessToken,
       gmailRefreshToken,
       connectedIntegrations,
+      workerUrl,
     } as Props,
     request: oauthReqInfo,
     scope: oauthReqInfo.scope,
     userId: login,
   });
 
-  // Clear the session binding cookie (one-time use)
   const headers = new Headers({ Location: redirectTo });
   if (clearSessionCookie) {
     headers.set("Set-Cookie", clearSessionCookie);
@@ -340,6 +414,56 @@ async function completeAuthorization(
   return new Response(null, {
     status: 302,
     headers,
+  });
+}
+
+/**
+ * Complete incremental authorization (adding new provider to existing session)
+ */
+async function completeIncrementalAuth(
+  c: any,
+  params: {
+    gmailAccessToken: string;
+    gmailRefreshToken?: string;
+    oauthReqInfo: AuthRequest;
+    workerUrl: string;
+  },
+) {
+  // For incremental auth, we create a special response that tells the client
+  // to merge these credentials with their existing session
+  const { gmailAccessToken, gmailRefreshToken, oauthReqInfo, workerUrl } = params;
+
+  // Note: In a production system, you'd need to:
+  // 1. Validate the existing session token
+  // 2. Merge the new credentials with existing ones
+  // 3. Return an updated token
+
+  // For this implementation, we'll complete with just the Gmail credentials
+  // The client should re-authenticate to get a merged token
+  const { redirectTo } = await c.env.OAUTH_PROVIDER.completeAuthorization({
+    metadata: {
+      label: "Gmail Integration Added",
+    },
+    props: {
+      accessToken: "", // Empty - client should merge with existing
+      email: "",
+      login: "",
+      name: "",
+      gmailAccessToken,
+      gmailRefreshToken,
+      connectedIntegrations: ["gmail"],
+      workerUrl,
+    } as Props,
+    request: oauthReqInfo,
+    scope: "gmail",
+    userId: "incremental",
+  });
+
+  return new Response(null, {
+    status: 302,
+    headers: {
+      Location: redirectTo,
+    },
   });
 }
 

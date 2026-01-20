@@ -29,10 +29,10 @@ type Props = {
   email: string;
   accessToken: string;
   gmailAccessToken?: string;
-  // Store refresh tokens for long-lived sessions
   gmailRefreshToken?: string;
-  // Track which integrations are connected
   connectedIntegrations: string[];
+  // Store the worker URL for generating auth URLs
+  workerUrl?: string;
 };
 
 const ALLOWED_USERNAMES = new Set<string>([
@@ -47,19 +47,23 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
   });
 
   async init() {
-    this.server.tool("listIntegrations", "List all connected integrations and their status", {}, async () => {
+    // List available integrations and their connection status
+    this.server.tool("listIntegrations", "List all available integrations and their connection status", {}, async () => {
       const integrations = {
         github: {
           connected: !!this.props?.accessToken,
           user: this.props?.login || null,
+          description: "Access GitHub repositories and user information",
         },
         gmail: {
           connected: !!this.props?.gmailAccessToken,
           email: this.props?.email || null,
+          description: "Send, read, and manage emails",
         },
         imageGeneration: {
           connected: ALLOWED_USERNAMES.has(this.props!.login),
           enabled: ALLOWED_USERNAMES.has(this.props!.login),
+          description: "Generate images using AI",
         },
       };
 
@@ -73,78 +77,134 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
       };
     });
 
-    // Hello, world!
+    // Basic math tool - always available, no auth required
     this.server.tool("add", "Add two numbers the way only MCP can", { a: z.number(), b: z.number() }, async ({ a, b }) => ({
       content: [{ text: String(a + b), type: "text" }],
     }));
 
-    // Use the upstream access token to facilitate tools
-    this.server.tool("userInfoOctokit", "Get user info from GitHub, via Octokit", {}, async () => {
-      const octokit = new Octokit({ auth: this.props!.accessToken });
-      return {
-        content: [
-          {
-            text: JSON.stringify(await octokit.rest.users.getAuthenticated()),
-            type: "text",
-          },
-        ],
-      };
+    // Register ALL tools, but they'll check permissions when called
+    await this.registerGitHubTools();
+    await this.registerGmailTools();
+  }
+
+  /**
+   * Helper to generate authorization URL for a specific provider
+   */
+  private generateAuthUrl(provider: string, returnContext?: any): string {
+    const baseUrl = this.env.SERVER_URL;
+    const url = new URL("/authorize", baseUrl);
+    url.searchParams.set("provider", provider);
+
+    if (returnContext) {
+      url.searchParams.set("context", btoa(JSON.stringify(returnContext)));
+    }
+
+    return url.toString();
+  }
+
+  /**
+   * Helper to create "authorization required" response
+   */
+  private authorizationRequired(provider: string, message: string, toolName?: string) {
+    const authUrl = this.generateAuthUrl(provider, {
+      returnTool: toolName,
+      timestamp: Date.now(),
     });
 
-    // Dynamically add tools based on the user's login. In this case, I want to limit
-    // access to my Image Generation tool to just me
-    if (ALLOWED_USERNAMES.has(this.props!.login)) {
-      this.server.tool(
-        "generateImage",
-        "Generate an image using the `flux-1-schnell` model. Works best with 8 steps.",
+    return {
+      content: [
         {
-          prompt: z.string().describe("A text description of the image you want to generate."),
-          steps: z
-            .number()
-            .min(4)
-            .max(8)
-            .default(4)
-            .describe(
-              "The number of diffusion steps; higher values can improve quality but take longer. Must be between 4 and 8, inclusive.",
-            ),
+          type: "text" as const,
+          text: JSON.stringify(
+            {
+              error: "authorization_required",
+              provider,
+              message,
+              authorizationUrl: authUrl,
+              instructions: `Please visit the authorization URL to connect ${provider}, then retry this action.`,
+            },
+            null,
+            2,
+          ),
         },
-        async ({ prompt, steps }) => {
-          const response = await this.env.AI.run("@cf/black-forest-labs/flux-1-schnell", {
-            prompt,
-            steps,
-          });
+      ],
+    };
+  }
+
+  private async registerGitHubTools() {
+    // GitHub user info tool
+    this.server.registerTool(
+      "userInfoOctokit",
+      {
+        title: "userInfoOctokit",
+        description: "Get authenticated user information from GitHub using Octokit",
+        // Explicitly declare no input parameters
+        inputSchema: z.object({}).strict(),
+        annotations: {
+          readOnlyHint: true,
+          idempotentHint: true,
+        },
+      },
+      async () => {
+        if (!this.props?.accessToken) {
+          return this.authorizationRequired("github", "GitHub integration is required to get user information", "userInfoOctokit");
+        }
+
+        try {
+          const octokit = new Octokit({ auth: this.props.accessToken });
+          const user = await octokit.rest.users.getAuthenticated();
 
           return {
-            content: [{ data: response.image!, mimeType: "image/jpeg", type: "image" }],
+            content: [
+              {
+                text: JSON.stringify(user.data, null, 2),
+                type: "text" as const,
+              },
+            ],
           };
-        },
-      );
-    }
-
-    // Initialize Gmail tools if access token is available
-    if (this.props!.gmailAccessToken) {
-      await this.registerGmailTools();
-    }
+        } catch (error: any) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `Error fetching GitHub user info: ${error.message}`,
+              },
+            ],
+          };
+        }
+      },
+    );
   }
 
   private async registerGmailTools() {
-    // Initialize OAuth2 client for Gmail
-    const oauth2Client = new OAuth2Client();
-    oauth2Client.setCredentials({
-      access_token: this.props!.gmailAccessToken,
-    });
+    // Helper to get Gmail client with auth check
+    const getGmailClient = (): [OAuth2Client, null] | [null, any] => {
+      if (!this.props?.gmailAccessToken) {
+        return [null, this.authorizationRequired("gmail", "Gmail integration is required for this action")];
+      }
 
-    const gmailTools = new GmailTools(oauth2Client);
+      const oauth2Client = new OAuth2Client();
+      oauth2Client.setCredentials({
+        access_token: this.props.gmailAccessToken,
+        refresh_token: this.props.gmailRefreshToken,
+      });
 
-    // Register send_email tool
+      return [oauth2Client, null];
+    };
+
+    // Send email tool
     this.server.registerTool(
       "send_email",
       {
-        description: "Sends a new email",
+        description: "Sends a new email via Gmail",
         inputSchema: SendEmailSchema.shape,
       },
       async (args) => {
+        const [client, authError] = getGmailClient();
+        if (!client) return authError;
+
         try {
+          const gmailTools = new GmailTools(client);
           return await gmailTools.sendEmail(args);
         } catch (error: any) {
           return {
@@ -154,15 +214,19 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
       },
     );
 
-    // Register draft_email tool
+    // Draft email tool
     this.server.registerTool(
       "draft_email",
       {
-        description: "Draft a new email",
+        description: "Draft a new email in Gmail",
         inputSchema: SendEmailSchema.shape,
       },
       async (args) => {
+        const [client, authError] = getGmailClient();
+        if (!client) return authError;
+
         try {
+          const gmailTools = new GmailTools(client);
           return await gmailTools.draftEmail(args);
         } catch (error: any) {
           return {
@@ -172,15 +236,19 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
       },
     );
 
-    // Register read_email tool
+    // Read email tool
     this.server.registerTool(
       "read_email",
       {
-        description: "Retrieves the content of a specific email",
+        description: "Retrieves the content of a specific email from Gmail",
         inputSchema: ReadEmailSchema.shape,
       },
       async (args) => {
+        const [client, authError] = getGmailClient();
+        if (!client) return authError;
+
         try {
+          const gmailTools = new GmailTools(client);
           return await gmailTools.readEmail(args);
         } catch (error: any) {
           return {
@@ -190,7 +258,7 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
       },
     );
 
-    // Register search_emails tool
+    // Search emails tool
     this.server.registerTool(
       "search_emails",
       {
@@ -198,7 +266,11 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
         inputSchema: SearchEmailsSchema.shape,
       },
       async (args) => {
+        const [client, authError] = getGmailClient();
+        if (!client) return authError;
+
         try {
+          const gmailTools = new GmailTools(client);
           return await gmailTools.searchEmails(args);
         } catch (error: any) {
           return {
@@ -208,7 +280,7 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
       },
     );
 
-    // Register modify_email tool
+    // Modify email tool
     this.server.registerTool(
       "modify_email",
       {
@@ -216,7 +288,11 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
         inputSchema: ModifyEmailSchema.shape,
       },
       async (args) => {
+        const [client, authError] = getGmailClient();
+        if (!client) return authError;
+
         try {
+          const gmailTools = new GmailTools(client);
           return await gmailTools.modifyEmail(args);
         } catch (error: any) {
           return {
@@ -226,15 +302,19 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
       },
     );
 
-    // Register delete_email tool
+    // Delete email tool
     this.server.registerTool(
       "delete_email",
       {
-        description: "Permanently deletes an email",
+        description: "Permanently deletes an email from Gmail",
         inputSchema: DeleteEmailSchema.shape,
       },
       async (args) => {
+        const [client, authError] = getGmailClient();
+        if (!client) return authError;
+
         try {
+          const gmailTools = new GmailTools(client);
           return await gmailTools.deleteEmail(args);
         } catch (error: any) {
           return {
@@ -244,7 +324,7 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
       },
     );
 
-    // Register list_email_labels tool
+    // List email labels tool
     this.server.registerTool(
       "list_email_labels",
       {
@@ -252,7 +332,11 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
         inputSchema: ListEmailLabelsSchema.shape,
       },
       async () => {
+        const [client, authError] = getGmailClient();
+        if (!client) return authError;
+
         try {
+          const gmailTools = new GmailTools(client);
           return await gmailTools.listEmailLabels();
         } catch (error: any) {
           return {
@@ -262,7 +346,7 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
       },
     );
 
-    // Register batch_modify_emails tool
+    // Batch modify emails tool
     this.server.registerTool(
       "batch_modify_emails",
       {
@@ -270,17 +354,26 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
         inputSchema: BatchModifyEmailsSchema.shape,
       },
       async (args) => {
+        const [client, authError] = getGmailClient();
+        if (!client) return authError;
+
         try {
+          const gmailTools = new GmailTools(client);
           return await gmailTools.batchModifyEmails(args);
         } catch (error: any) {
           return {
-            content: [{ type: "text", text: `Error batch modifying emails: ${error.message}` }],
+            content: [
+              {
+                type: "text",
+                text: `Error batch modifying emails: ${error.message}`,
+              },
+            ],
           };
         }
       },
     );
 
-    // Register batch_delete_emails tool
+    // Batch delete emails tool
     this.server.registerTool(
       "batch_delete_emails",
       {
@@ -288,17 +381,26 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
         inputSchema: BatchDeleteEmailsSchema.shape,
       },
       async (args) => {
+        const [client, authError] = getGmailClient();
+        if (!client) return authError;
+
         try {
+          const gmailTools = new GmailTools(client);
           return await gmailTools.batchDeleteEmails(args);
         } catch (error: any) {
           return {
-            content: [{ type: "text", text: `Error batch deleting emails: ${error.message}` }],
+            content: [
+              {
+                type: "text",
+                text: `Error batch deleting emails: ${error.message}`,
+              },
+            ],
           };
         }
       },
     );
 
-    // Register create_label tool
+    // Create label tool
     this.server.registerTool(
       "create_label",
       {
@@ -306,7 +408,11 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
         inputSchema: CreateLabelSchema.shape,
       },
       async (args) => {
+        const [client, authError] = getGmailClient();
+        if (!client) return authError;
+
         try {
+          const gmailTools = new GmailTools(client);
           return await gmailTools.createLabel(args);
         } catch (error: any) {
           return {
@@ -316,7 +422,7 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
       },
     );
 
-    // Register update_label tool
+    // Update label tool
     this.server.registerTool(
       "update_label",
       {
@@ -324,7 +430,11 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
         inputSchema: UpdateLabelSchema.shape,
       },
       async (args) => {
+        const [client, authError] = getGmailClient();
+        if (!client) return authError;
+
         try {
+          const gmailTools = new GmailTools(client);
           return await gmailTools.updateLabel(args);
         } catch (error: any) {
           return {
@@ -334,7 +444,7 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
       },
     );
 
-    // Register delete_label tool
+    // Delete label tool
     this.server.registerTool(
       "delete_label",
       {
@@ -342,7 +452,11 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
         inputSchema: DeleteLabelSchema.shape,
       },
       async (args) => {
+        const [client, authError] = getGmailClient();
+        if (!client) return authError;
+
         try {
+          const gmailTools = new GmailTools(client);
           return await gmailTools.deleteLabel(args);
         } catch (error: any) {
           return {
@@ -352,7 +466,7 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
       },
     );
 
-    // Register get_or_create_label tool
+    // Get or create label tool
     this.server.registerTool(
       "get_or_create_label",
       {
@@ -360,11 +474,20 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
         inputSchema: GetOrCreateLabelSchema.shape,
       },
       async (args) => {
+        const [client, authError] = getGmailClient();
+        if (!client) return authError;
+
         try {
+          const gmailTools = new GmailTools(client);
           return await gmailTools.getOrCreateLabel(args);
         } catch (error: any) {
           return {
-            content: [{ type: "text", text: `Error getting or creating label: ${error.message}` }],
+            content: [
+              {
+                type: "text",
+                text: `Error getting or creating label: ${error.message}`,
+              },
+            ],
           };
         }
       },
@@ -373,11 +496,9 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
 }
 
 export default new OAuthProvider({
-  // NOTE - during the summer 2025, the SSE protocol was deprecated and replaced by the Streamable-HTTP protocol
-  // https://developers.cloudflare.com/agents/model-context-protocol/transport/#mcp-server-with-authentication
   apiHandlers: {
-    "/sse": MyMCP.serveSSE("/sse"), // deprecated SSE protocol - use /mcp instead
-    "/mcp": MyMCP.serve("/mcp"), // Streamable-HTTP protocol
+    "/sse": MyMCP.serveSSE("/sse"),
+    "/mcp": MyMCP.serve("/mcp"),
   },
   authorizeEndpoint: "/authorize",
   clientRegistrationEndpoint: "/register",
