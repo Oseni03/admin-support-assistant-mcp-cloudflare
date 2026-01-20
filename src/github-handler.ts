@@ -32,18 +32,90 @@ interface PendingAuth {
 const app = new Hono<{ Bindings: Env & { OAUTH_PROVIDER: OAuthHelpers } }>();
 
 /**
+ * Handle direct provider authorization (when user clicks auth link from tool response)
+ */
+async function handleDirectProviderAuth(c: any, provider: string, context?: string) {
+  // For direct authorization, we need to capture the user's current MCP session
+  // so we can merge the new credentials with their existing session
+
+  // Extract the current MCP token from Authorization header if present
+  const authHeader = c.req.header("Authorization");
+  const currentToken = authHeader?.replace("Bearer ", "");
+
+  if (provider === "gmail") {
+    // Create a pending auth entry for Gmail
+    const pendingKey = crypto.randomUUID();
+    const pendingAuth: PendingAuth = {
+      githubToken: "",
+      userData: { login: "gmail-user", name: "Gmail User", email: "" },
+      oauthRequest: {} as AuthRequest,
+      completedProviders: [],
+      requestedProvider: "gmail",
+      existingProps: currentToken ? ({ currentToken } as any) : undefined,
+    };
+
+    await c.env.OAUTH_KV.put(`pending:${pendingKey}`, JSON.stringify(pendingAuth), { expirationTtl: 600 });
+
+    // Redirect directly to Google OAuth
+    const gmailAuthUrl = getUpstreamAuthorizeUrl({
+      client_id: c.env.GOOGLE_CLIENT_ID,
+      redirect_uri: new URL("/callback/gmail-direct", c.req.url).href, // Different callback
+      scope: "https://www.googleapis.com/auth/gmail.modify",
+      state: pendingKey,
+      upstream_url: "https://accounts.google.com/o/oauth2/v2/auth",
+      access_type: "offline",
+      prompt: "consent",
+    });
+
+    return c.redirect(gmailAuthUrl);
+  }
+
+  if (provider === "github") {
+    const pendingKey = crypto.randomUUID();
+    const pendingAuth: PendingAuth = {
+      githubToken: "",
+      userData: { login: "", name: "", email: "" },
+      oauthRequest: {} as AuthRequest,
+      completedProviders: [],
+      requestedProvider: "github",
+      existingProps: currentToken ? ({ currentToken } as any) : undefined,
+    };
+
+    await c.env.OAUTH_KV.put(`pending:${pendingKey}`, JSON.stringify(pendingAuth), { expirationTtl: 600 });
+
+    const githubAuthUrl = getUpstreamAuthorizeUrl({
+      client_id: c.env.GITHUB_CLIENT_ID,
+      redirect_uri: new URL("/callback/github-direct", c.req.url).href, // Different callback
+      scope: "read:user user:email",
+      state: pendingKey,
+      upstream_url: "https://github.com/login/oauth/authorize",
+    });
+
+    return c.redirect(githubAuthUrl);
+  }
+
+  return c.text(`Unknown provider: ${provider}`, 400);
+}
+
+/**
  * Authorization endpoint - handles both initial auth and incremental auth
  */
 app.get("/authorize", async (c) => {
+  // Check for specific provider request (incremental auth via direct URL)
+  const requestedProvider = c.req.query("provider");
+  const context = c.req.query("context");
+
+  // If this is a direct provider authorization (not from MCP OAuth flow)
+  if (requestedProvider && !c.req.query("client_id")) {
+    return handleDirectProviderAuth(c, requestedProvider, context);
+  }
+
+  // Standard MCP OAuth flow
   const oauthReqInfo = await c.env.OAUTH_PROVIDER.parseAuthRequest(c.req.raw);
   const { clientId } = oauthReqInfo;
   if (!clientId) {
     return c.text("Invalid request", 400);
   }
-
-  // Check for specific provider request (incremental auth)
-  const requestedProvider = c.req.query("provider");
-  const context = c.req.query("context");
 
   // Check if client is already approved
   if (await isClientApproved(c.req.raw, clientId, env.COOKIE_ENCRYPTION_KEY)) {
@@ -169,12 +241,13 @@ async function redirectToGmail(request: Request, stateToken: string, oauthReqInf
   const pendingKey = crypto.randomUUID();
   const pendingAuth: PendingAuth = {
     githubToken: "", // Empty for Gmail-only flow
-    userData: { login: "", name: "", email: "" },
+    userData: { login: "gmail-user", name: "Gmail User", email: "" },
     oauthRequest: oauthReqInfo,
     completedProviders: [],
     requestedProvider: "gmail",
   };
 
+  // Store in KV with the pendingKey (not stateToken)
   await env.OAUTH_KV.put(`pending:${pendingKey}`, JSON.stringify(pendingAuth), { expirationTtl: 600 });
 
   return new Response(null, {
@@ -184,7 +257,7 @@ async function redirectToGmail(request: Request, stateToken: string, oauthReqInf
         client_id: env.GOOGLE_CLIENT_ID,
         redirect_uri: new URL("/callback/gmail", request.url).href,
         scope: "https://www.googleapis.com/auth/gmail.modify",
-        state: pendingKey,
+        state: pendingKey, // Use pendingKey as state for Gmail OAuth
         upstream_url: "https://accounts.google.com/o/oauth2/v2/auth",
         access_type: "offline",
         prompt: "consent",
@@ -324,24 +397,26 @@ app.get("/callback/gmail", async (c) => {
   // Clean up pending auth
   await c.env.OAUTH_KV.delete(`pending:${pendingKey}`);
 
-  // Check if this is an incremental auth (adding Gmail to existing session)
-  const isIncrementalAuth = pending.requestedProvider === "gmail";
+  // Check if this is Gmail-only auth (no GitHub)
+  const isGmailOnly = !pending.githubToken || pending.requestedProvider === "gmail";
 
-  if (isIncrementalAuth) {
-    // This is adding Gmail to an existing authenticated session
-    // We need to update the existing token with Gmail credentials
-
-    // For incremental auth, we need to trigger a re-authorization flow
-    // that merges the new Gmail token with existing credentials
-    return completeIncrementalAuth(c, {
+  if (isGmailOnly) {
+    // Gmail-only flow: create session with just Gmail
+    return completeAuthorization(c, {
+      accessToken: "", // No GitHub token
+      login: "gmail-user",
+      name: "Gmail User",
+      email: "",
       gmailAccessToken,
       gmailRefreshToken,
+      clearSessionCookie: "",
       oauthReqInfo: pending.oauthRequest,
+      connectedIntegrations: ["gmail"],
       workerUrl: new URL(c.req.url).origin,
     });
   }
 
-  // Complete multi-provider authorization (GitHub + Gmail)
+  // Multi-provider flow: Complete with both GitHub + Gmail
   return completeAuthorization(c, {
     accessToken: pending.githubToken,
     login: pending.userData.login,
@@ -354,6 +429,189 @@ app.get("/callback/gmail", async (c) => {
     connectedIntegrations: ["github", "gmail"],
     workerUrl: new URL(c.req.url).origin,
   });
+});
+
+/**
+ * Direct Gmail callback - for when user authorizes Gmail via direct link
+ */
+app.get("/callback/gmail-direct", async (c) => {
+  const pendingKey = c.req.query("state");
+  const code = c.req.query("code");
+
+  if (!pendingKey || !code) {
+    return c.text("Missing state or code parameter", 400);
+  }
+
+  // Retrieve pending auth data
+  const pendingData = await c.env.OAUTH_KV.get(`pending:${pendingKey}`);
+  if (!pendingData) {
+    return c.text("Invalid or expired authorization state", 400);
+  }
+
+  // Exchange Gmail code for access token
+  const [gmailTokenResponse, errResponse] = await fetchUpstreamAuthToken({
+    client_id: c.env.GOOGLE_CLIENT_ID,
+    client_secret: c.env.GOOGLE_CLIENT_SECRET,
+    code,
+    redirect_uri: new URL("/callback/gmail-direct", c.req.url).href,
+    upstream_url: "https://oauth2.googleapis.com/token",
+  });
+  if (errResponse) return errResponse;
+
+  // Parse tokens
+  let gmailAccessToken: string;
+  let gmailRefreshToken: string | undefined;
+
+  if (typeof gmailTokenResponse === "string" && gmailTokenResponse.startsWith("{")) {
+    const tokenData = JSON.parse(gmailTokenResponse);
+    gmailAccessToken = tokenData.access_token;
+    gmailRefreshToken = tokenData.refresh_token;
+  } else {
+    gmailAccessToken = gmailTokenResponse;
+  }
+
+  // Clean up pending auth
+  await c.env.OAUTH_KV.delete(`pending:${pendingKey}`);
+
+  // Show success page with instructions
+  return c.html(`
+    <!DOCTYPE html>
+    <html>
+      <head>
+        <title>Gmail Authorization Successful</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <style>
+          * { margin: 0; padding: 0; box-sizing: border-box; }
+          body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+          }
+          .container {
+            background: white;
+            border-radius: 16px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            max-width: 500px;
+            width: 100%;
+            overflow: hidden;
+          }
+          .header {
+            background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+            color: white;
+            padding: 40px 30px;
+            text-align: center;
+          }
+          .checkmark {
+            width: 60px;
+            height: 60px;
+            border-radius: 50%;
+            background: white;
+            margin: 0 auto 20px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 32px;
+          }
+          h1 { font-size: 24px; margin-bottom: 10px; }
+          .subtitle { opacity: 0.9; font-size: 14px; }
+          .content {
+            padding: 30px;
+          }
+          .step {
+            display: flex;
+            margin-bottom: 20px;
+            align-items: flex-start;
+          }
+          .step-number {
+            background: #667eea;
+            color: white;
+            width: 28px;
+            height: 28px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            font-size: 14px;
+            flex-shrink: 0;
+            margin-right: 12px;
+          }
+          .step-text {
+            flex: 1;
+            padding-top: 4px;
+          }
+          .token-info {
+            background: #f3f4f6;
+            border-radius: 8px;
+            padding: 15px;
+            margin-top: 20px;
+            font-size: 13px;
+            color: #6b7280;
+          }
+          .token-value {
+            font-family: monospace;
+            font-size: 11px;
+            background: #e5e7eb;
+            padding: 8px;
+            border-radius: 4px;
+            margin-top: 8px;
+            word-break: break-all;
+          }
+          .close-btn {
+            width: 100%;
+            background: #667eea;
+            color: white;
+            border: none;
+            padding: 14px;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            margin-top: 20px;
+            transition: background 0.2s;
+          }
+          .close-btn:hover {
+            background: #5568d3;
+          }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <div class="header">
+            <div class="checkmark">✓</div>
+            <h1>Gmail Connected!</h1>
+            <div class="subtitle">Your Gmail account has been successfully authorized</div>
+          </div>
+          <div class="content">
+            <div class="step">
+              <div class="step-number">1</div>
+              <div class="step-text">Return to your AI assistant (Claude, ChatGPT, etc.)</div>
+            </div>
+            <div class="step">
+              <div class="step-number">2</div>
+              <div class="step-text">Retry the Gmail action you were trying to perform</div>
+            </div>
+            <div class="step">
+              <div class="step-number">3</div>
+              <div class="step-text">Your Gmail tools should now work seamlessly!</div>
+            </div>
+            
+            <div class="token-info">
+              <strong>📝 For developers:</strong>
+              <div class="token-value">Access Token: ${gmailAccessToken.substring(0, 20)}...${gmailAccessToken.substring(gmailAccessToken.length - 10)}</div>
+              ${gmailRefreshToken ? `<div class="token-value" style="margin-top:8px">Refresh Token: Available ✓</div>` : ""}
+            </div>
+
+            <button class="close-btn" onclick="window.close()">Close This Window</button>
+          </div>
+        </div>
+      </body>
+    </html>
+  `);
 });
 
 /**
@@ -414,56 +672,6 @@ async function completeAuthorization(
   return new Response(null, {
     status: 302,
     headers,
-  });
-}
-
-/**
- * Complete incremental authorization (adding new provider to existing session)
- */
-async function completeIncrementalAuth(
-  c: any,
-  params: {
-    gmailAccessToken: string;
-    gmailRefreshToken?: string;
-    oauthReqInfo: AuthRequest;
-    workerUrl: string;
-  },
-) {
-  // For incremental auth, we create a special response that tells the client
-  // to merge these credentials with their existing session
-  const { gmailAccessToken, gmailRefreshToken, oauthReqInfo, workerUrl } = params;
-
-  // Note: In a production system, you'd need to:
-  // 1. Validate the existing session token
-  // 2. Merge the new credentials with existing ones
-  // 3. Return an updated token
-
-  // For this implementation, we'll complete with just the Gmail credentials
-  // The client should re-authenticate to get a merged token
-  const { redirectTo } = await c.env.OAUTH_PROVIDER.completeAuthorization({
-    metadata: {
-      label: "Gmail Integration Added",
-    },
-    props: {
-      accessToken: "", // Empty - client should merge with existing
-      email: "",
-      login: "",
-      name: "",
-      gmailAccessToken,
-      gmailRefreshToken,
-      connectedIntegrations: ["gmail"],
-      workerUrl,
-    } as Props,
-    request: oauthReqInfo,
-    scope: "gmail",
-    userId: "incremental",
-  });
-
-  return new Response(null, {
-    status: 302,
-    headers: {
-      Location: redirectTo,
-    },
   });
 }
 
