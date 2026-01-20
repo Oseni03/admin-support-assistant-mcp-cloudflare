@@ -3,7 +3,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { McpAgent } from "agents/mcp";
 import { Octokit } from "octokit";
 import { z } from "zod";
-import { GitHubHandler } from "./github-handler";
+import { OAuthHandler } from "./github-handler";
 import { OAuth2Client } from "google-auth-library";
 import {
   GmailTools,
@@ -28,7 +28,11 @@ type Props = {
   name: string;
   email: string;
   accessToken: string;
-  gmailAccessToken?: string; // Optional Gmail token if using separate auth
+  gmailAccessToken?: string;
+  // Store refresh tokens for long-lived sessions
+  gmailRefreshToken?: string;
+  // Track which integrations are connected
+  connectedIntegrations: string[];
 };
 
 const ALLOWED_USERNAMES = new Set<string>([
@@ -43,6 +47,32 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
   });
 
   async init() {
+    this.server.tool("listIntegrations", "List all connected integrations and their status", {}, async () => {
+      const integrations = {
+        github: {
+          connected: !!this.props?.accessToken,
+          user: this.props?.login || null,
+        },
+        gmail: {
+          connected: !!this.props?.gmailAccessToken,
+          email: this.props?.email || null,
+        },
+        imageGeneration: {
+          connected: ALLOWED_USERNAMES.has(this.props!.login),
+          enabled: ALLOWED_USERNAMES.has(this.props!.login),
+        },
+      };
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(integrations, null, 2),
+          },
+        ],
+      };
+    });
+
     // Hello, world!
     this.server.tool("add", "Add two numbers the way only MCP can", { a: z.number(), b: z.number() }, async ({ a, b }) => ({
       content: [{ text: String(a + b), type: "text" }],
@@ -351,6 +381,6 @@ export default new OAuthProvider({
   },
   authorizeEndpoint: "/authorize",
   clientRegistrationEndpoint: "/register",
-  defaultHandler: GitHubHandler as any,
+  defaultHandler: OAuthHandler as any,
   tokenEndpoint: "/token",
 });
