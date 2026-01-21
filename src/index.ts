@@ -3,7 +3,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { McpAgent } from "agents/mcp";
 import { Octokit } from "octokit";
 import { z } from "zod";
-import { OAuthHandler } from "./github-handler";
+import { OAuthHandler } from "./oauth-handler";
 import { OAuth2Client } from "google-auth-library";
 import { gmailTools } from "./tools/gmail";
 import { createGmailContext } from "./tools/gmail/context";

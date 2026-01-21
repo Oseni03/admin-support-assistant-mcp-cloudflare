@@ -477,7 +477,12 @@ app.get("/callback/:provider", async (c) => {
 
   console.log("Token exchange response:", tokenResponse);
 
-  if (errResponse) return errResponse;
+  if (errResponse) {
+    // Log the full error for debugging
+    const errorText = await errResponse.text();
+    console.error("Token exchange failed:", errorText);
+    return errResponse;
+  }
 
   // Parse tokens
   let accessToken: string;
