@@ -98,6 +98,32 @@ async function handleDirectProviderAuth(c: any, provider: string, context?: stri
     return c.redirect(calendarAuthUrl);
   }
 
+  if (provider === "drive") {
+    const pendingKey = crypto.randomUUID();
+    const pendingAuth: PendingAuth = {
+      githubToken: "",
+      userData: { login: "drive-user", name: "Google Drive User", email: "" },
+      oauthRequest: {} as AuthRequest,
+      completedProviders: [],
+      requestedProvider: "drive",
+      existingProps: currentToken ? ({ currentToken } as any) : undefined,
+    };
+
+    await c.env.OAUTH_KV.put(`pending:${pendingKey}`, JSON.stringify(pendingAuth), { expirationTtl: 600 });
+
+    const driveAuthUrl = getUpstreamAuthorizeUrl({
+      client_id: c.env.GOOGLE_CLIENT_ID,
+      redirect_uri: new URL("/callback/drive", c.req.url).href,
+      scope: "https://www.googleapis.com/auth/drive",
+      state: pendingKey,
+      upstream_url: "https://accounts.google.com/o/oauth2/v2/auth",
+      access_type: "offline",
+      prompt: "consent",
+    });
+
+    return c.redirect(driveAuthUrl);
+  }
+
   return c.text(`Unknown provider: ${provider}`, 400);
 }
 
@@ -151,12 +177,17 @@ app.get("/authorize", async (c) => {
   } else if (requestedProvider === "github") {
     integrations.push("GitHub");
   } else if (requestedProvider === "calendar") {
-    integrations.push("Calendar");
+    integrations.push("Google Calendar");
+  } else if (requestedProvider === "drive") {
+    integrations.push("Google Drive");
   } else {
     // Default flow - GitHub first
     integrations.push("GitHub");
     if (requestedScopes.includes("gmail")) {
       integrations.push("Gmail (after GitHub)");
+    }
+    if (requestedScopes.includes("drive")) {
+      integrations.push("Google Drive (after GitHub)");
     }
   }
 
@@ -453,12 +484,12 @@ app.get("/callback/:provider", async (c) => {
       refreshTokenVar = "calendarRefreshToken";
       providerDisplayName = "Google Calendar";
       break;
-    // case "drive":
-    //   scopeName = "drive";
-    //   accessTokenVar = "driveAccessToken";
-    //   refreshTokenVar = "driveRefreshToken";
-    //   providerDisplayName = "Google Drive";
-    //   break;
+    case "drive":
+      scopeName = "drive";
+      accessTokenVar = "driveAccessToken";
+      refreshTokenVar = "driveRefreshToken";
+      providerDisplayName = "Google Drive";
+      break;
     default:
       return c.text("Internal provider configuration error", 500);
   }
@@ -507,6 +538,9 @@ app.get("/callback/:provider", async (c) => {
     const props: Partial<Props> = {
       [accessTokenVar]: accessToken,
       [refreshTokenVar]: refreshToken,
+      ...(provider === "drive" ? { driveAccessToken: accessToken, driveRefreshToken: refreshToken } : {}),
+      ...(provider === "gmail" ? { gmailAccessToken: accessToken, gmailRefreshToken: refreshToken } : {}),
+      ...(provider === "calendar" ? { calendarAccessToken: accessToken, calendarRefreshToken: refreshToken } : {}),
       connectedIntegrations: [scopeName],
       workerUrl: new URL(c.req.url).origin,
     };
@@ -520,6 +554,8 @@ app.get("/callback/:provider", async (c) => {
       oauthReqInfo: pending.oauthRequest || ({} as AuthRequest),
       connectedIntegrations: [scopeName],
       workerUrl: new URL(c.req.url).origin,
+      driveAccessToken: provider === "drive" ? accessToken : undefined,
+      driveRefreshToken: provider === "drive" ? refreshToken : undefined,
       ...props,
     });
   }
@@ -528,6 +564,9 @@ app.get("/callback/:provider", async (c) => {
   const props: Partial<Props> = {
     [accessTokenVar]: accessToken,
     [refreshTokenVar]: refreshToken,
+    ...(scopeName === "gmail" ? { gmailAccessToken: accessToken, gmailRefreshToken: refreshToken } : {}),
+    ...(scopeName === "calendar" ? { calendarAccessToken: accessToken, calendarRefreshToken: refreshToken } : {}),
+    ...(scopeName === "drive" ? { driveAccessToken: accessToken, driveRefreshToken: refreshToken } : {}),
     connectedIntegrations: ["github", scopeName],
   };
 
@@ -558,6 +597,8 @@ async function completeAuthorization(
     gmailRefreshToken?: string;
     calendarAccessToken?: string;
     calendarRefreshToken?: string;
+    driveAccessToken?: string;
+    driveRefreshToken?: string;
     clearSessionCookie: string;
     oauthReqInfo: AuthRequest;
     connectedIntegrations: string[];
@@ -573,6 +614,8 @@ async function completeAuthorization(
     gmailRefreshToken,
     calendarAccessToken,
     calendarRefreshToken,
+    driveAccessToken,
+    driveRefreshToken,
     clearSessionCookie,
     oauthReqInfo,
     connectedIntegrations,
@@ -592,6 +635,8 @@ async function completeAuthorization(
       gmailRefreshToken,
       calendarAccessToken,
       calendarRefreshToken,
+      driveAccessToken,
+      driveRefreshToken,
       connectedIntegrations,
       workerUrl,
     } as Props,

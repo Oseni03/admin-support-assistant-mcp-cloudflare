@@ -116,8 +116,10 @@ export type Props = {
   accessToken: string;
   gmailAccessToken?: string;
   gmailRefreshToken?: string;
-  calendarAccessToken?: string; // ← NEW
-  calendarRefreshToken?: string; // ← NEW
+  calendarAccessToken?: string;
+  calendarRefreshToken?: string;
+  driveAccessToken?: string;
+  driveRefreshToken?: string;
   connectedIntegrations: string[];
   workerUrl?: string;
 };

@@ -10,6 +10,8 @@ import { createGmailContext } from "./tools/gmail/context";
 import { calendarTools } from "./tools/google-calendar";
 import { createCalendarContext } from "./tools/google-calendar/context";
 import { Props } from "./utils";
+import { createDriveContext } from "./tools/google-drive/context";
+import { driveTools } from "./tools/google-drive";
 
 const ALLOWED_USERNAMES = new Set<string>([
   // Add GitHub usernames allowed to use restricted tools
@@ -40,6 +42,11 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
           email: this.props?.email || null,
           description: "Manage Google Calendar events and calendars",
         },
+        drive: {
+          connected: !!this.props?.driveAccessToken,
+          email: this.props?.email || null,
+          description: "Read, write, and manage files in Google Drive",
+        },
         imageGeneration: {
           connected: ALLOWED_USERNAMES.has(this.props!.login),
           enabled: ALLOWED_USERNAMES.has(this.props!.login),
@@ -65,6 +72,9 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
 
     // ── Register Calendar tools (same JIT pattern) ───────────────────
     await this.registerCalendarTools();
+
+    // ── Google Drive tools (JIT auth) ─────────────────────────────────────
+    await this.registerDriveTools();
   }
 
   // ── GitHub tools registration (unchanged) ───────────────────────────────
@@ -136,7 +146,7 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
     }
   }
 
-  // ── NEW: Calendar tools registration (identical pattern) ───────────────
+  // ── Calendar tools registration (identical pattern) ───────────────
   private async registerCalendarTools() {
     // Helper: returns [context, null] or [null, authError]
     const getCalendarContext = (): [any, null] | [null, any] => {
@@ -163,6 +173,44 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
         },
         async (args: z.infer<typeof toolDef.schema>) => {
           const [ctx, authError] = getCalendarContext();
+          if (!ctx) return authError;
+
+          try {
+            return await toolDef.handler(ctx, args as any);
+          } catch (err: any) {
+            return {
+              content: [{ type: "text", text: `Error: ${err.message}` }],
+            };
+          }
+        },
+      );
+    }
+  }
+
+  private async registerDriveTools() {
+    const getDriveContext = (): [any, null] | [null, any] => {
+      if (!this.props?.driveAccessToken) {
+        return [null, this.authorizationRequired("drive", "Google Drive integration is required for this action")];
+      }
+
+      const oauth = new OAuth2Client();
+      oauth.setCredentials({
+        access_token: this.props.driveAccessToken,
+        refresh_token: this.props.driveRefreshToken,
+      });
+
+      return [createDriveContext(oauth), null];
+    };
+
+    for (const [toolName, toolDef] of Object.entries(driveTools)) {
+      this.server.registerTool(
+        toolName,
+        {
+          description: toolDef.description,
+          inputSchema: toolDef.schema.shape ?? {},
+        },
+        async (args: z.infer<typeof toolDef.schema>) => {
+          const [ctx, authError] = getDriveContext();
           if (!ctx) return authError;
 
           try {
