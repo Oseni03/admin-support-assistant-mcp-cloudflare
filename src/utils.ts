@@ -11,32 +11,30 @@
  *
  * @returns {string} The authorization URL.
  */
-export function getUpstreamAuthorizeUrl({
-  upstream_url,
-  client_id,
-  scope,
-  redirect_uri,
-  access_type,
-  prompt,
-  state,
-}: {
+export function getUpstreamAuthorizeUrl(params: {
   upstream_url: string;
   client_id: string;
   scope: string;
   redirect_uri: string;
   access_type?: string;
   prompt?: string;
-  state?: string;
-}) {
-  const upstream = new URL(upstream_url);
-  upstream.searchParams.set("client_id", client_id);
-  upstream.searchParams.set("redirect_uri", redirect_uri);
-  upstream.searchParams.set("scope", scope);
-  if (state) upstream.searchParams.set("state", state);
-  if (access_type) upstream.searchParams.set("access_type", access_type);
-  if (prompt) upstream.searchParams.set("prompt", prompt);
-  upstream.searchParams.set("response_type", "code");
-  return upstream.href;
+  state: string;
+}): string {
+  const url = new URL(params.upstream_url);
+  url.searchParams.set("client_id", params.client_id);
+  url.searchParams.set("redirect_uri", params.redirect_uri);
+  url.searchParams.set("scope", params.scope);
+  url.searchParams.set("state", params.state);
+  url.searchParams.set("response_type", "code");
+
+  if (params.access_type) {
+    url.searchParams.set("access_type", params.access_type);
+  }
+  if (params.prompt) {
+    url.searchParams.set("prompt", params.prompt);
+  }
+
+  return url.toString();
 }
 
 /**
@@ -68,22 +66,44 @@ export async function fetchUpstreamAuthToken({
     return [null, new Response("Missing code", { status: 400 })];
   }
 
+  const bodyParams = new URLSearchParams({
+    client_id,
+    client_secret,
+    code,
+    redirect_uri,
+    grant_type: "authorization_code",
+  });
+
+  console.log("Token request:", {
+    url: upstream_url,
+    redirect_uri,
+    client_id: client_id.substring(0, 10) + "...", // partial for security
+    code_prefix: code.substring(0, 10) + "...",
+  });
+
   const resp = await fetch(upstream_url, {
-    body: new URLSearchParams({ client_id, client_secret, code, redirect_uri, grant_type: "authorization_code" }).toString(),
+    body: bodyParams.toString(),
     headers: {
       "Content-Type": "application/x-www-form-urlencoded",
     },
     method: "POST",
   });
+
   if (!resp.ok) {
-    console.log(await resp.text());
-    return [null, new Response("Failed to fetch access token", { status: 500 })];
+    const errorText = await resp.text();
+    console.error("Google token endpoint error:", {
+      status: resp.status,
+      body: errorText,
+    });
+    return [null, new Response(`Failed to fetch access token: ${errorText}`, { status: 500 })];
   }
+
   const body = await resp.formData();
   const accessToken = body.get("access_token") as string;
   if (!accessToken) {
     return [null, new Response("Missing access token", { status: 400 })];
   }
+
   return [accessToken, null];
 }
 
@@ -94,6 +114,12 @@ export type Props = {
   name: string;
   email: string;
   accessToken: string;
+  gmailAccessToken?: string;
+  gmailRefreshToken?: string;
+  calendarAccessToken?: string; // ← NEW
+  calendarRefreshToken?: string; // ← NEW
+  connectedIntegrations: string[];
+  workerUrl?: string;
 };
 
 /**

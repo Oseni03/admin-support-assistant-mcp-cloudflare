@@ -7,18 +7,9 @@ import { OAuthHandler } from "./github-handler";
 import { OAuth2Client } from "google-auth-library";
 import { gmailTools } from "./tools/gmail";
 import { createGmailContext } from "./tools/gmail/context";
-
-// Context from the auth process (encrypted in token)
-type Props = {
-  login: string;
-  name: string;
-  email: string;
-  accessToken: string;
-  gmailAccessToken?: string;
-  gmailRefreshToken?: string;
-  connectedIntegrations: string[];
-  workerUrl?: string;
-};
+import { calendarTools } from "./tools/google-calendar";
+import { createCalendarContext } from "./tools/google-calendar/context";
+import { Props } from "./utils";
 
 const ALLOWED_USERNAMES = new Set<string>([
   // Add GitHub usernames allowed to use restricted tools
@@ -26,7 +17,7 @@ const ALLOWED_USERNAMES = new Set<string>([
 
 export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
   server = new McpServer({
-    name: "Github OAuth Proxy Demo with Gmail",
+    name: "Github OAuth Proxy Demo with Gmail & Calendar",
     version: "1.0.0",
   });
 
@@ -42,7 +33,12 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
         gmail: {
           connected: !!this.props?.gmailAccessToken,
           email: this.props?.email || null,
-          description: "Send, read, and manage emails",
+          description: "Send, read, and manage Google emails",
+        },
+        calendar: {
+          connected: !!this.props?.calendarAccessToken,
+          email: this.props?.email || null,
+          description: "Manage Google Calendar events and calendars",
         },
         imageGeneration: {
           connected: ALLOWED_USERNAMES.has(this.props!.login),
@@ -66,6 +62,9 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
 
     // ── Register Gmail tools (JIT auth preserved!) ────────────────────────
     await this.registerGmailTools();
+
+    // ── Register Calendar tools (same JIT pattern) ───────────────────
+    await this.registerCalendarTools();
   }
 
   // ── GitHub tools registration (unchanged) ───────────────────────────────
@@ -98,9 +97,8 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
     );
   }
 
-  // ── NEW: Gmail tools registration (modular + JIT auth) ─────────────────
+  // ── Gmail tools registration (unchanged) ───────────────────────────────
   private async registerGmailTools() {
-    // Helper: returns [context, null] or [null, authError]
     const getGmailContext = (): [any, null] | [null, any] => {
       if (!this.props?.gmailAccessToken) {
         return [null, this.authorizationRequired("gmail", "Gmail integration is required for this action")];
@@ -115,7 +113,6 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
       return [createGmailContext(oauth), null];
     };
 
-    // Register every Gmail tool declaratively
     for (const [toolName, toolDef] of Object.entries(gmailTools)) {
       this.server.registerTool(
         toolName,
@@ -128,7 +125,47 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
           if (!ctx) return authError;
 
           try {
-            // Call the stateless handler
+            return await toolDef.handler(ctx, args as any);
+          } catch (err: any) {
+            return {
+              content: [{ type: "text", text: `Error: ${err.message}` }],
+            };
+          }
+        },
+      );
+    }
+  }
+
+  // ── NEW: Calendar tools registration (identical pattern) ───────────────
+  private async registerCalendarTools() {
+    // Helper: returns [context, null] or [null, authError]
+    const getCalendarContext = (): [any, null] | [null, any] => {
+      if (!this.props?.calendarAccessToken) {
+        return [null, this.authorizationRequired("calendar", "Google Calendar integration is required for this action")];
+      }
+
+      const oauth = new OAuth2Client();
+      oauth.setCredentials({
+        access_token: this.props.calendarAccessToken,
+        refresh_token: this.props.calendarRefreshToken,
+      });
+
+      return [createCalendarContext(oauth), null];
+    };
+
+    // Register every Calendar tool declaratively
+    for (const [toolName, toolDef] of Object.entries(calendarTools)) {
+      this.server.registerTool(
+        toolName,
+        {
+          description: toolDef.description,
+          inputSchema: toolDef.schema.shape ?? {},
+        },
+        async (args: z.infer<typeof toolDef.schema>) => {
+          const [ctx, authError] = getCalendarContext();
+          if (!ctx) return authError;
+
+          try {
             return await toolDef.handler(ctx, args as any);
           } catch (err: any) {
             return {

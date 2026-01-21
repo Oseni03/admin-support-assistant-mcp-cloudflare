@@ -56,10 +56,10 @@ async function handleDirectProviderAuth(c: any, provider: string, context?: stri
 
     await c.env.OAUTH_KV.put(`pending:${pendingKey}`, JSON.stringify(pendingAuth), { expirationTtl: 600 });
 
-    // Redirect directly to Google OAuth
+    // Redirect directly to Google OAuth for Gmail
     const gmailAuthUrl = getUpstreamAuthorizeUrl({
       client_id: c.env.GOOGLE_CLIENT_ID,
-      redirect_uri: new URL("/callback/gmail-direct", c.req.url).href, // Different callback
+      redirect_uri: new URL("/callback/gmail", c.req.url).href, // Different callback
       scope: "https://www.googleapis.com/auth/gmail.modify",
       state: pendingKey,
       upstream_url: "https://accounts.google.com/o/oauth2/v2/auth",
@@ -70,28 +70,32 @@ async function handleDirectProviderAuth(c: any, provider: string, context?: stri
     return c.redirect(gmailAuthUrl);
   }
 
-  if (provider === "github") {
+  // ── NEW: Google Calendar support ───────────────────────────────────────
+  if (provider === "calendar") {
     const pendingKey = crypto.randomUUID();
     const pendingAuth: PendingAuth = {
       githubToken: "",
-      userData: { login: "", name: "", email: "" },
+      userData: { login: "calendar-user", name: "Calendar User", email: "" },
       oauthRequest: {} as AuthRequest,
       completedProviders: [],
-      requestedProvider: "github",
+      requestedProvider: "calendar",
       existingProps: currentToken ? ({ currentToken } as any) : undefined,
     };
 
     await c.env.OAUTH_KV.put(`pending:${pendingKey}`, JSON.stringify(pendingAuth), { expirationTtl: 600 });
 
-    const githubAuthUrl = getUpstreamAuthorizeUrl({
-      client_id: c.env.GITHUB_CLIENT_ID,
-      redirect_uri: new URL("/callback/github-direct", c.req.url).href, // Different callback
-      scope: "read:user user:email",
+    // Redirect directly to Google OAuth for Calendar
+    const calendarAuthUrl = getUpstreamAuthorizeUrl({
+      client_id: c.env.GOOGLE_CLIENT_ID, // same client ID as Gmail (Google allows multiple scopes)
+      redirect_uri: new URL("/callback/calendar", c.req.url).href,
+      scope: ["https://www.googleapis.com/auth/calendar", "https://www.googleapis.com/auth/calendar.events"].join(" "),
       state: pendingKey,
-      upstream_url: "https://github.com/login/oauth/authorize",
+      upstream_url: "https://accounts.google.com/o/oauth2/v2/auth",
+      access_type: "offline",
+      prompt: "consent",
     });
 
-    return c.redirect(githubAuthUrl);
+    return c.redirect(calendarAuthUrl);
   }
 
   return c.text(`Unknown provider: ${provider}`, 400);
@@ -127,6 +131,9 @@ app.get("/authorize", async (c) => {
     if (requestedProvider === "gmail") {
       return redirectToGmail(c.req.raw, stateToken, oauthReqInfo, { "Set-Cookie": sessionBindingCookie });
     }
+    if (requestedProvider === "calendar") {
+      return redirectToCalendar(c.req.raw, stateToken, oauthReqInfo, { "Set-Cookie": sessionBindingCookie });
+    }
 
     // Default to GitHub
     return redirectToGithub(c.req.raw, stateToken, { "Set-Cookie": sessionBindingCookie });
@@ -143,6 +150,8 @@ app.get("/authorize", async (c) => {
     integrations.push("Gmail");
   } else if (requestedProvider === "github") {
     integrations.push("GitHub");
+  } else if (requestedProvider === "calendar") {
+    integrations.push("Calendar");
   } else {
     // Default flow - GitHub first
     integrations.push("GitHub");
@@ -209,6 +218,9 @@ app.post("/authorize", async (c) => {
     if (state.requestedProvider === "gmail") {
       return redirectToGmail(c.req.raw, stateToken, state.oauthReqInfo, Object.fromEntries(headers));
     }
+    if (state.requestedProvider === "calendar") {
+      return redirectToCalendar(c.req.raw, stateToken, state.oauthReqInfo, Object.fromEntries(headers));
+    }
 
     return redirectToGithub(c.req.raw, stateToken, Object.fromEntries(headers));
   } catch (error: any) {
@@ -258,6 +270,41 @@ async function redirectToGmail(request: Request, stateToken: string, oauthReqInf
         redirect_uri: new URL("/callback/gmail", request.url).href,
         scope: "https://www.googleapis.com/auth/gmail.modify",
         state: pendingKey, // Use pendingKey as state for Gmail OAuth
+        upstream_url: "https://accounts.google.com/o/oauth2/v2/auth",
+        access_type: "offline",
+        prompt: "consent",
+      }),
+    },
+    status: 302,
+  });
+}
+
+/**
+ * Redirect to Google Calendar OAuth consent screen
+ * Used when the user needs to authorize Calendar (either standalone or after GitHub)
+ */
+async function redirectToCalendar(request: Request, stateToken: string, oauthReqInfo: AuthRequest, headers: Record<string, string> = {}) {
+  // Store the OAuth request info for Calendar-only or incremental flow
+  const pendingKey = crypto.randomUUID();
+  const pendingAuth: PendingAuth = {
+    githubToken: "", // Empty for Calendar-only flow
+    userData: { login: "calendar-user", name: "Calendar User", email: "" },
+    oauthRequest: oauthReqInfo,
+    completedProviders: [],
+    requestedProvider: "calendar",
+  };
+
+  // Store in KV using the pendingKey (not stateToken)
+  await env.OAUTH_KV.put(`pending:${pendingKey}`, JSON.stringify(pendingAuth), { expirationTtl: 600 });
+
+  return new Response(null, {
+    headers: {
+      ...headers,
+      location: getUpstreamAuthorizeUrl({
+        client_id: env.GOOGLE_CLIENT_ID,
+        redirect_uri: new URL("/callback/calendar", request.url).href, // ← Main Calendar callback
+        scope: ["https://www.googleapis.com/auth/calendar", "https://www.googleapis.com/auth/calendar.events"].join(" "),
+        state: pendingKey, // Use pendingKey as state for Google OAuth
         upstream_url: "https://accounts.google.com/o/oauth2/v2/auth",
         access_type: "offline",
         prompt: "consent",
@@ -356,7 +403,22 @@ app.get("/callback", async (c) => {
 /**
  * Gmail OAuth Callback - Handles both incremental auth and initial multi-provider flow
  */
-app.get("/callback/gmail", async (c) => {
+/**
+ * Unified Google Callback Handler
+ * Handles callbacks for Gmail, Calendar, Drive, etc.
+ * Supports both:
+ *   - Standalone / direct auth
+ *   - Chained multi-provider flow (GitHub → Google provider)
+ */
+app.get("/callback/:provider", async (c) => {
+  const provider = c.req.param("provider"); // "gmail", "calendar", "drive", etc.
+
+  // Validate supported providers
+  const supportedProviders = ["gmail", "calendar", "drive"];
+  if (!supportedProviders.includes(provider)) {
+    return c.text(`Unsupported provider: ${provider}`, 400);
+  }
+
   const pendingKey = c.req.query("state");
   const code = c.req.query("code");
 
@@ -372,246 +434,109 @@ app.get("/callback/gmail", async (c) => {
 
   const pending: PendingAuth = JSON.parse(pendingData);
 
-  // Exchange Gmail code for access token
-  const [gmailTokenResponse, errResponse] = await fetchUpstreamAuthToken({
+  // Determine the scopes and token variable names based on provider
+  let scopeName: string;
+  let accessTokenVar: keyof Props;
+  let refreshTokenVar: keyof Props;
+  let providerDisplayName: string;
+
+  switch (provider) {
+    case "gmail":
+      scopeName = "gmail";
+      accessTokenVar = "gmailAccessToken";
+      refreshTokenVar = "gmailRefreshToken";
+      providerDisplayName = "Gmail";
+      break;
+    case "calendar":
+      scopeName = "calendar";
+      accessTokenVar = "calendarAccessToken";
+      refreshTokenVar = "calendarRefreshToken";
+      providerDisplayName = "Google Calendar";
+      break;
+    // case "drive":
+    //   scopeName = "drive";
+    //   accessTokenVar = "driveAccessToken";
+    //   refreshTokenVar = "driveRefreshToken";
+    //   providerDisplayName = "Google Drive";
+    //   break;
+    default:
+      return c.text("Internal provider configuration error", 500);
+  }
+
+  const callbackUrl = new URL(`/callback/${provider}`, c.req.url).href;
+  console.log("Callback URI used:", callbackUrl);
+
+  // Exchange code for tokens
+  const [tokenResponse, errResponse] = await fetchUpstreamAuthToken({
     client_id: c.env.GOOGLE_CLIENT_ID,
     client_secret: c.env.GOOGLE_CLIENT_SECRET,
     code,
-    redirect_uri: new URL("/callback/gmail", c.req.url).href,
+    redirect_uri: callbackUrl,
     upstream_url: "https://oauth2.googleapis.com/token",
   });
+
+  console.log("Token exchange response:", tokenResponse);
+
   if (errResponse) return errResponse;
 
-  // Parse the Gmail token response
-  let gmailAccessToken: string;
-  let gmailRefreshToken: string | undefined;
+  // Parse tokens
+  let accessToken: string;
+  let refreshToken: string | undefined;
 
-  if (typeof gmailTokenResponse === "string" && gmailTokenResponse.startsWith("{")) {
-    const tokenData = JSON.parse(gmailTokenResponse);
-    gmailAccessToken = tokenData.access_token;
-    gmailRefreshToken = tokenData.refresh_token;
+  if (typeof tokenResponse === "string" && tokenResponse.startsWith("{")) {
+    const tokenData = JSON.parse(tokenResponse);
+    accessToken = tokenData.access_token;
+    refreshToken = tokenData.refresh_token;
   } else {
-    gmailAccessToken = gmailTokenResponse;
+    accessToken = tokenResponse;
   }
 
   // Clean up pending auth
   await c.env.OAUTH_KV.delete(`pending:${pendingKey}`);
 
-  // Check if this is Gmail-only auth (no GitHub)
-  const isGmailOnly = !pending.githubToken || pending.requestedProvider === "gmail";
+  // Determine if this is standalone (direct) auth or chained
+  const isStandalone = !pending.githubToken || pending.requestedProvider === scopeName;
 
-  if (isGmailOnly) {
-    // Gmail-only flow: create session with just Gmail
+  if (isStandalone) {
+    // Standalone flow: create session with just this Google provider
+    const props: Partial<Props> = {
+      [accessTokenVar]: accessToken,
+      [refreshTokenVar]: refreshToken,
+      connectedIntegrations: [scopeName],
+      workerUrl: new URL(c.req.url).origin,
+    };
+
     return completeAuthorization(c, {
       accessToken: "", // No GitHub token
-      login: "gmail-user",
-      name: "Gmail User",
+      login: `${scopeName}-user`,
+      name: `${providerDisplayName} User`,
       email: "",
-      gmailAccessToken,
-      gmailRefreshToken,
       clearSessionCookie: "",
-      oauthReqInfo: pending.oauthRequest,
-      connectedIntegrations: ["gmail"],
+      oauthReqInfo: pending.oauthRequest || ({} as AuthRequest),
+      connectedIntegrations: [scopeName],
       workerUrl: new URL(c.req.url).origin,
+      ...props,
     });
   }
 
-  // Multi-provider flow: Complete with both GitHub + Gmail
+  // Chained flow: complete with GitHub + this Google provider
+  const props: Partial<Props> = {
+    [accessTokenVar]: accessToken,
+    [refreshTokenVar]: refreshToken,
+    connectedIntegrations: ["github", scopeName],
+  };
+
   return completeAuthorization(c, {
     accessToken: pending.githubToken,
     login: pending.userData.login,
     name: pending.userData.name,
     email: pending.userData.email,
-    gmailAccessToken,
-    gmailRefreshToken,
     clearSessionCookie: "",
     oauthReqInfo: pending.oauthRequest,
-    connectedIntegrations: ["github", "gmail"],
+    connectedIntegrations: ["github", scopeName],
     workerUrl: new URL(c.req.url).origin,
+    ...props,
   });
-});
-
-/**
- * Direct Gmail callback - for when user authorizes Gmail via direct link
- */
-app.get("/callback/gmail-direct", async (c) => {
-  const pendingKey = c.req.query("state");
-  const code = c.req.query("code");
-
-  if (!pendingKey || !code) {
-    return c.text("Missing state or code parameter", 400);
-  }
-
-  // Retrieve pending auth data
-  const pendingData = await c.env.OAUTH_KV.get(`pending:${pendingKey}`);
-  if (!pendingData) {
-    return c.text("Invalid or expired authorization state", 400);
-  }
-
-  // Exchange Gmail code for access token
-  const [gmailTokenResponse, errResponse] = await fetchUpstreamAuthToken({
-    client_id: c.env.GOOGLE_CLIENT_ID,
-    client_secret: c.env.GOOGLE_CLIENT_SECRET,
-    code,
-    redirect_uri: new URL("/callback/gmail-direct", c.req.url).href,
-    upstream_url: "https://oauth2.googleapis.com/token",
-  });
-  if (errResponse) return errResponse;
-
-  // Parse tokens
-  let gmailAccessToken: string;
-  let gmailRefreshToken: string | undefined;
-
-  if (typeof gmailTokenResponse === "string" && gmailTokenResponse.startsWith("{")) {
-    const tokenData = JSON.parse(gmailTokenResponse);
-    gmailAccessToken = tokenData.access_token;
-    gmailRefreshToken = tokenData.refresh_token;
-  } else {
-    gmailAccessToken = gmailTokenResponse;
-  }
-
-  // Clean up pending auth
-  await c.env.OAUTH_KV.delete(`pending:${pendingKey}`);
-
-  // Show success page with instructions
-  return c.html(`
-    <!DOCTYPE html>
-    <html>
-      <head>
-        <title>Gmail Authorization Successful</title>
-        <meta name="viewport" content="width=device-width, initial-scale=1">
-        <style>
-          * { margin: 0; padding: 0; box-sizing: border-box; }
-          body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            padding: 20px;
-          }
-          .container {
-            background: white;
-            border-radius: 16px;
-            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
-            max-width: 500px;
-            width: 100%;
-            overflow: hidden;
-          }
-          .header {
-            background: linear-gradient(135deg, #10b981 0%, #059669 100%);
-            color: white;
-            padding: 40px 30px;
-            text-align: center;
-          }
-          .checkmark {
-            width: 60px;
-            height: 60px;
-            border-radius: 50%;
-            background: white;
-            margin: 0 auto 20px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 32px;
-          }
-          h1 { font-size: 24px; margin-bottom: 10px; }
-          .subtitle { opacity: 0.9; font-size: 14px; }
-          .content {
-            padding: 30px;
-          }
-          .step {
-            display: flex;
-            margin-bottom: 20px;
-            align-items: flex-start;
-          }
-          .step-number {
-            background: #667eea;
-            color: white;
-            width: 28px;
-            height: 28px;
-            border-radius: 50%;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-weight: bold;
-            font-size: 14px;
-            flex-shrink: 0;
-            margin-right: 12px;
-          }
-          .step-text {
-            flex: 1;
-            padding-top: 4px;
-          }
-          .token-info {
-            background: #f3f4f6;
-            border-radius: 8px;
-            padding: 15px;
-            margin-top: 20px;
-            font-size: 13px;
-            color: #6b7280;
-          }
-          .token-value {
-            font-family: monospace;
-            font-size: 11px;
-            background: #e5e7eb;
-            padding: 8px;
-            border-radius: 4px;
-            margin-top: 8px;
-            word-break: break-all;
-          }
-          .close-btn {
-            width: 100%;
-            background: #667eea;
-            color: white;
-            border: none;
-            padding: 14px;
-            border-radius: 8px;
-            font-size: 16px;
-            font-weight: 600;
-            cursor: pointer;
-            margin-top: 20px;
-            transition: background 0.2s;
-          }
-          .close-btn:hover {
-            background: #5568d3;
-          }
-        </style>
-      </head>
-      <body>
-        <div class="container">
-          <div class="header">
-            <div class="checkmark">✓</div>
-            <h1>Gmail Connected!</h1>
-            <div class="subtitle">Your Gmail account has been successfully authorized</div>
-          </div>
-          <div class="content">
-            <div class="step">
-              <div class="step-number">1</div>
-              <div class="step-text">Return to your AI assistant (Claude, ChatGPT, etc.)</div>
-            </div>
-            <div class="step">
-              <div class="step-number">2</div>
-              <div class="step-text">Retry the Gmail action you were trying to perform</div>
-            </div>
-            <div class="step">
-              <div class="step-number">3</div>
-              <div class="step-text">Your Gmail tools should now work seamlessly!</div>
-            </div>
-            
-            <div class="token-info">
-              <strong>📝 For developers:</strong>
-              <div class="token-value">Access Token: ${gmailAccessToken.substring(0, 20)}...${gmailAccessToken.substring(gmailAccessToken.length - 10)}</div>
-              ${gmailRefreshToken ? `<div class="token-value" style="margin-top:8px">Refresh Token: Available ✓</div>` : ""}
-            </div>
-
-            <button class="close-btn" onclick="window.close()">Close This Window</button>
-          </div>
-        </div>
-      </body>
-    </html>
-  `);
 });
 
 /**
@@ -626,6 +551,8 @@ async function completeAuthorization(
     email: string;
     gmailAccessToken?: string;
     gmailRefreshToken?: string;
+    calendarAccessToken?: string;
+    calendarRefreshToken?: string;
     clearSessionCookie: string;
     oauthReqInfo: AuthRequest;
     connectedIntegrations: string[];
@@ -639,6 +566,8 @@ async function completeAuthorization(
     email,
     gmailAccessToken,
     gmailRefreshToken,
+    calendarAccessToken,
+    calendarRefreshToken,
     clearSessionCookie,
     oauthReqInfo,
     connectedIntegrations,
@@ -656,6 +585,8 @@ async function completeAuthorization(
       name,
       gmailAccessToken,
       gmailRefreshToken,
+      calendarAccessToken,
+      calendarRefreshToken,
       connectedIntegrations,
       workerUrl,
     } as Props,
