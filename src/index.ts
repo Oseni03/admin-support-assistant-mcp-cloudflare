@@ -29,12 +29,13 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
 
   async init() {
     // ── List available integrations ─────────────────────────────────────────
+    // Register the integrations resource
     this.server.registerResource(
-      "integrationsList",
+      "integrations-list",
       "integrations://list",
       {
-        title: "Available Integrations",
-        description: "List all available integrations and their connection status",
+        title: "Integrations List",
+        description: "Interactive view of all available integrations and their connection status",
         mimeType: "text/html",
       },
       async () => {
@@ -71,136 +72,96 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
           },
         };
 
+        const integrationsWithUrls = Object.entries(integrations).map(([name, info]) => ({
+          name,
+          ...info,
+          connectUrl: this.generateAuthUrl(name.toLowerCase()),
+        }));
+
         const html = `
-      <!DOCTYPE html>
-      <html>
+        <!DOCTYPE html>
+        <html>
         <head>
-          <style>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Integrations</title>
+        <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+        <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+        <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+        <style>
+            * { margin: 0; padding: 0; box-sizing: border-box; }
             body { 
-              font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-              padding: 20px; 
-              background: #f9fafb;
-              margin: 0;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background: #f9fafb;
             }
-            .container { max-width: 800px; margin: 0 auto; }
-            h1 { color: #111827; margin-bottom: 24px; }
-            .integration { 
-              background: white;
-              border: 1px solid #e5e7eb; 
-              border-radius: 8px; 
-              padding: 16px; 
-              margin-bottom: 12px;
-              display: flex;
-              justify-content: space-between;
-              align-items: center;
-            }
-            .integration.connected { border-left: 4px solid #10b981; }
-            .integration.disconnected { border-left: 4px solid #ef4444; }
-            .info { flex: 1; }
-            .title { 
-              font-weight: 600; 
-              font-size: 18px; 
-              margin-bottom: 4px; 
-              color: #111827;
-            }
-            .description { 
-              color: #6b7280; 
-              margin-bottom: 8px; 
-              font-size: 14px;
-            }
-            .status { 
-              display: inline-block; 
-              padding: 4px 12px; 
-              border-radius: 12px; 
-              font-size: 14px;
-              font-weight: 500;
-            }
-            .status.connected { background: #d1fae5; color: #065f46; }
-            .status.disconnected { background: #fee2e2; color: #991b1b; }
-            .user { 
-              color: #4b5563; 
-              font-size: 13px; 
-              margin-top: 6px;
-              font-family: monospace;
-            }
-            .actions {
-              display: flex;
-              gap: 8px;
-              margin-left: 16px;
-            }
-            .btn {
-              padding: 8px 16px;
-              border-radius: 6px;
-              text-decoration: none;
-              font-size: 14px;
-              font-weight: 500;
-              display: inline-block;
-              transition: all 0.2s;
-            }
-            .btn-connect {
-              background: #0070f3;
-              color: white;
-              border: none;
-            }
-            .btn-connect:hover {
-              background: #0051cc;
-            }
-            .btn-disconnect {
-              background: #ef4444;
-              color: white;
-              border: none;
-            }
-            .btn-disconnect:hover {
-              background: #dc2626;
-            }
-            .btn-disabled {
-              background: #e5e7eb;
-              color: #9ca3af;
-              cursor: not-allowed;
-              pointer-events: none;
-            }
-          </style>
+            #root { min-height: 100vh; padding: 20px; }
+        </style>
         </head>
         <body>
-          <div class="container">
-            <h1>Available Integrations</h1>
-            ${Object.entries(integrations)
-              .map(([name, info]) => {
-                const providerName = name.toLowerCase();
-                const connectUrl = this.generateAuthUrl(providerName);
-
-                return `
-                <div class="integration ${info.connected ? "connected" : "disconnected"}">
-                  <div class="info">
-                    <div class="title">${name.charAt(0).toUpperCase() + name.slice(1)}</div>
-                    <div class="description">${info.description}</div>
-                    <span class="status ${info.connected ? "connected" : "disconnected"}">
-                      ${info.connected ? "✓ Connected" : "✗ Not Connected"}
+        <div id="root"></div>
+        <script type="text/babel">
+            const { useState } = React;
+            const IntegrationCard = ({ integration }) => {
+            const capitalizedName = integration.name.charAt(0).toUpperCase() + integration.name.slice(1);
+            const [isHovered, setIsHovered] = useState(false);
+            const cardStyle = {
+                background: 'white',
+                border: '1px solid #e5e7eb',
+                borderLeft: integration.connected ? '4px solid #10b981' : '4px solid #ef4444',
+                borderRadius: '8px',
+                padding: '16px',
+                marginBottom: '12px',
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                transition: 'transform 0.2s, box-shadow 0.2s',
+                ...(isHovered ? { transform: 'translateY(-2px)', boxShadow: '0 4px 12px rgba(0,0,0,0.1)' } : {})
+            };
+            return (
+                <div style={cardStyle} onMouseEnter={() => setIsHovered(true)} onMouseLeave={() => setIsHovered(false)}>
+                <div style={{ flex: 1 }}>
+                    <div style={{ fontWeight: 600, fontSize: '18px', marginBottom: '4px', color: '#111827' }}>{capitalizedName}</div>
+                    <div style={{ color: '#6b7280', marginBottom: '8px', fontSize: '14px' }}>{integration.description}</div>
+                    <span style={{ display: 'inline-block', padding: '4px 12px', borderRadius: '12px', fontSize: '14px', fontWeight: 500, background: integration.connected ? '#d1fae5' : '#fee2e2', color: integration.connected ? '#065f46' : '#991b1b' }}>
+                    {integration.connected ? '✓ Connected' : '✗ Not Connected'}
                     </span>
-                  </div>
-                  <div class="actions">
-                    ${
-                      !info.connected
-                        ? `
-                      <a href="${connectUrl}" class="btn btn-connect" target="_blank">
-                        Connect
-                      </a>
-                    `
-                        : `
-                      <a href="#" class="btn btn-disconnect" onclick="alert('Disconnection requires re-authorization. Please reconnect to remove access.'); return false;">
-                        Disconnect
-                      </a>
-                    `
-                    }
-                  </div>
+                    {(integration.user || integration.email) && (
+                    <div style={{ color: '#4b5563', fontSize: '13px', marginTop: '6px', fontFamily: 'monospace' }}>Account: {integration.user || integration.email}</div>
+                    )}
                 </div>
-              `;
-              })
-              .join("")}
-          </div>
+                <div style={{ marginLeft: '16px' }}>
+                    {!integration.connected ? (
+                    <a href={integration.connectUrl} target="_blank" rel="noopener noreferrer" style={{ padding: '8px 16px', borderRadius: '6px', background: '#0070f3', color: 'white', textDecoration: 'none', fontSize: '14px', fontWeight: 500, display: 'inline-block' }}>Connect</a>
+                    ) : (
+                    <button onClick={() => alert('To disconnect, reconnect to revoke access.')} style={{ padding: '8px 16px', borderRadius: '6px', background: '#ef4444', color: 'white', border: 'none', fontSize: '14px', fontWeight: 500, cursor: 'pointer' }}>Disconnect</button>
+                    )}
+                </div>
+                </div>
+            );
+            };
+            const IntegrationsList = () => {
+            const integrations = ${JSON.stringify(integrationsWithUrls)};
+            const [filter, setFilter] = useState('all');
+            const filteredIntegrations = integrations.filter(i => filter === 'all' || (filter === 'connected' ? i.connected : !i.connected));
+            return (
+                <div style={{ maxWidth: '800px', margin: '0 auto' }}>
+                <div style={{ marginBottom: '24px' }}>
+                    <h1 style={{ color: '#111827', marginBottom: '12px', fontSize: '32px', fontWeight: 700 }}>Available Integrations</h1>
+                    <div style={{ display: 'flex', gap: '8px' }}>
+                    {['all', 'connected', 'disconnected'].map(f => (
+                        <button key={f} onClick={() => setFilter(f)} style={{ padding: '6px 12px', borderRadius: '6px', border: '1px solid #e5e7eb', background: filter === f ? '#0070f3' : 'white', color: filter === f ? 'white' : '#111827', fontSize: '14px', fontWeight: 500, cursor: 'pointer', textTransform: 'capitalize' }}>{f}</button>
+                    ))}
+                    </div>
+                </div>
+                {filteredIntegrations.map(i => <IntegrationCard key={i.name} integration={i} />)}
+                {filteredIntegrations.length === 0 && <div style={{ textAlign: 'center', padding: '40px', color: '#6b7280' }}>No {filter} integrations found.</div>}
+                </div>
+            );
+            };
+            ReactDOM.render(<IntegrationsList />, document.getElementById('root'));
+        </script>
         </body>
-      </html>
-    `;
+        </html>`;
 
         return {
           contents: [
@@ -214,7 +175,7 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
       },
     );
 
-    // Register the tool that references the resource
+    // Register the tool that returns a ResourceLink
     this.server.registerTool(
       "listIntegrations",
       {
@@ -226,12 +187,15 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
         return {
           content: [
             {
-              type: "resource" as const,
-              resource: {
-                uri: "integrations://list",
-                mimeType: "text/html",
-                text: "", // This will be populated by the resource handler
-              },
+              type: "text" as const,
+              text: "Here's an interactive view of your available integrations:",
+            },
+            {
+              type: "resource_link" as const,
+              uri: "integrations://list",
+              name: "Integrations Dashboard",
+              mimeType: "text/html",
+              description: "Interactive view showing connection status and options for all integrations",
             },
           ],
         };
