@@ -11,9 +11,11 @@ import { calendarTools } from "./tools/google-calendar";
 import { createCalendarContext } from "./tools/google-calendar/context";
 import { notionTools } from "./tools/notion";
 import { createNotionContext } from "./tools/notion/context";
-import { Props } from "./utils";
+import { slackTools } from "./tools/slack";
+import { createSlackContext } from "./tools/slack/context";
 import { createDriveContext } from "./tools/google-drive/context";
 import { driveTools } from "./tools/google-drive";
+import { Props } from "./utils";
 
 const ALLOWED_USERNAMES = new Set<string>([
   // Add GitHub usernames allowed to use restricted tools
@@ -21,7 +23,7 @@ const ALLOWED_USERNAMES = new Set<string>([
 
 export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
   server = new McpServer({
-    name: "Admin Assistant",
+    name: "Admin Assistant MCP with GitHub, Gmail, Calendar, Notion & Slack Integrations",
     version: "1.0.0",
   });
 
@@ -54,6 +56,11 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
           user: this.props?.login || null,
           description: "Access and manage Notion pages and databases",
         },
+        slack: {
+          connected: !!this.props?.slackAccessToken,
+          user: this.props?.login || null,
+          description: "Send messages and manage Slack workspace",
+        },
         imageGeneration: {
           connected: ALLOWED_USERNAMES.has(this.props!.login),
           enabled: ALLOWED_USERNAMES.has(this.props!.login),
@@ -85,6 +92,9 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
 
     // ── Register Notion tools (NEW - same JIT pattern) ──────────────────────
     await this.registerNotionTools();
+
+    // ── Register Slack tools (NEW - same JIT pattern) ───────────────────────
+    await this.registerSlackTools();
   }
 
   // ── GitHub tools registration (unchanged) ───────────────────────────────
@@ -256,6 +266,41 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
         },
         async (args: z.infer<typeof toolDef.schema>) => {
           const [ctx, authError] = getNotionContext();
+          if (!ctx) return authError;
+
+          try {
+            return await toolDef.handler(ctx, args as any);
+          } catch (err: any) {
+            return {
+              content: [{ type: "text", text: `Error: ${err.message}` }],
+            };
+          }
+        },
+      );
+    }
+  }
+
+  // ── NEW: Slack tools registration (same JIT pattern) ────────────────────
+  private async registerSlackTools() {
+    // Helper: returns [context, null] or [null, authError]
+    const getSlackContext = (): [any, null] | [null, any] => {
+      if (!this.props?.slackAccessToken) {
+        return [null, this.authorizationRequired("slack", "Slack integration is required for this action")];
+      }
+
+      return [createSlackContext(this.props.slackAccessToken), null];
+    };
+
+    // Register every Slack tool declaratively
+    for (const [toolName, toolDef] of Object.entries(slackTools)) {
+      this.server.registerTool(
+        toolName,
+        {
+          description: toolDef.description,
+          inputSchema: toolDef.schema.shape ?? {},
+        },
+        async (args: z.infer<typeof toolDef.schema>) => {
+          const [ctx, authError] = getSlackContext();
           if (!ctx) return authError;
 
           try {

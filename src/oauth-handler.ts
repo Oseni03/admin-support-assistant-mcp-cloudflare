@@ -111,6 +111,7 @@ app.get("/authorize", async (c) => {
     if (requestedScopes.includes("calendar")) integrations.push("Google Calendar");
     if (requestedScopes.includes("drive")) integrations.push("Google Drive");
     if (requestedScopes.includes("notion")) integrations.push("Notion");
+    if (requestedScopes.includes("slack")) integrations.push("Slack");
   }
 
   const description = requestedProvider
@@ -235,6 +236,34 @@ async function redirectToProvider(request: Request, stateToken: string, provider
       });
       break;
 
+    case "slack":
+      authUrl = getUpstreamAuthorizeUrl({
+        client_id: env.SLACK_CLIENT_ID,
+        redirect_uri: new URL("/callback/slack", request.url).href,
+        scope: [
+          "channels:read",
+          "channels:write",
+          "channels:history",
+          "chat:write",
+          "files:write",
+          "groups:read",
+          "groups:write",
+          "groups:history",
+          "im:history",
+          "im:read",
+          "im:write",
+          "mpim:history",
+          "mpim:read",
+          "mpim:write",
+          "reactions:write",
+          "search:read",
+          "users:read",
+        ].join(","),
+        state: stateToken,
+        upstream_url: "https://slack.com/oauth/v2/authorize",
+      });
+      break;
+
     default:
       throw new Error(`Unsupported provider: ${provider}`);
   }
@@ -255,7 +284,7 @@ app.get("/callback/:provider", async (c) => {
   const provider = c.req.param("provider");
 
   // Supported providers
-  const supported = ["github", "gmail", "calendar", "drive", "notion"];
+  const supported = ["github", "gmail", "calendar", "drive", "notion", "slack"];
   if (!supported.includes(provider)) {
     return c.text(`Unsupported provider: ${provider}`, 400);
   }
@@ -310,6 +339,9 @@ app.get("/callback/:provider", async (c) => {
               ? { accessToken: existingProps.driveAccessToken, refreshToken: existingProps.driveRefreshToken }
               : undefined,
             notion: existingProps.notionAccessToken ? { accessToken: existingProps.notionAccessToken } : undefined,
+            slack: existingProps.slackAccessToken
+              ? { accessToken: existingProps.slackAccessToken, refreshToken: existingProps.slackRefreshToken }
+              : undefined,
           }
         : {}),
       github: { accessToken },
@@ -324,6 +356,88 @@ app.get("/callback/:provider", async (c) => {
       ...stateData,
       providers: cleanedProviders,
       userData: { login, name: name || login, email: email || "" },
+      connectedIntegrations: mergedIntegrations,
+      clearSessionCookie,
+    });
+  } else if (provider === "slack") {
+    // Slack OAuth
+    const tokenResponse = await fetch("https://slack.com/api/oauth.v2.access", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams({
+        client_id: c.env.SLACK_CLIENT_ID,
+        client_secret: c.env.SLACK_CLIENT_SECRET,
+        code: c.req.query("code") || "",
+        redirect_uri: callbackUrl,
+      }),
+    });
+
+    if (!tokenResponse.ok) {
+      const errorText = await tokenResponse.text();
+      console.error("Slack token error:", errorText);
+      return new Response(`Failed to fetch Slack token: ${errorText}`, { status: 500 });
+    }
+
+    const tokenData = (await tokenResponse.json()) as {
+      ok: boolean;
+      access_token?: string;
+      team?: { id: string; name: string };
+      authed_user?: { id: string };
+      error?: string;
+    };
+
+    if (!tokenData.ok || !tokenData.access_token) {
+      console.error("Slack OAuth error:", tokenData.error);
+      return new Response(`Slack OAuth error: ${tokenData.error}`, { status: 500 });
+    }
+
+    accessToken = tokenData.access_token;
+
+    // Build user data - prefer existing props
+    const existingProps = stateData.existingProps as Props | undefined;
+    let userData = existingProps
+      ? {
+          login: existingProps.login,
+          name: existingProps.name,
+          email: existingProps.email,
+        }
+      : {
+          login: tokenData.authed_user?.id || "slack-user",
+          name: tokenData.team?.name || "Slack User",
+          email: "",
+        };
+
+    // Merge providers
+    const mergedProviders = {
+      ...(existingProps
+        ? {
+            github: existingProps.accessToken ? { accessToken: existingProps.accessToken } : undefined,
+            gmail: existingProps.gmailAccessToken
+              ? { accessToken: existingProps.gmailAccessToken, refreshToken: existingProps.gmailRefreshToken }
+              : undefined,
+            calendar: existingProps.calendarAccessToken
+              ? { accessToken: existingProps.calendarAccessToken, refreshToken: existingProps.calendarRefreshToken }
+              : undefined,
+            drive: existingProps.driveAccessToken
+              ? { accessToken: existingProps.driveAccessToken, refreshToken: existingProps.driveRefreshToken }
+              : undefined,
+            notion: existingProps.notionAccessToken ? { accessToken: existingProps.notionAccessToken } : undefined,
+          }
+        : {}),
+      slack: { accessToken },
+    };
+
+    // Filter out undefined providers
+    const cleanedProviders = Object.fromEntries(Object.entries(mergedProviders).filter(([_, v]) => v !== undefined));
+
+    const mergedIntegrations = Array.from(new Set([...(existingProps?.connectedIntegrations || []), "slack"]));
+
+    return completeAuthorization(c, {
+      ...stateData,
+      providers: cleanedProviders,
+      userData,
       connectedIntegrations: mergedIntegrations,
       clearSessionCookie,
     });
@@ -382,6 +496,9 @@ app.get("/callback/:provider", async (c) => {
               : undefined,
             drive: existingProps.driveAccessToken
               ? { accessToken: existingProps.driveAccessToken, refreshToken: existingProps.driveRefreshToken }
+              : undefined,
+            slack: existingProps.slackAccessToken
+              ? { accessToken: existingProps.slackAccessToken, refreshToken: existingProps.slackRefreshToken }
               : undefined,
           }
         : {}),
@@ -520,7 +637,12 @@ app.get("/callback/:provider", async (c) => {
                 : existingProps.driveAccessToken
                   ? { accessToken: existingProps.driveAccessToken, refreshToken: existingProps.driveRefreshToken }
                   : undefined,
-            notion: existingProps.notionAccessToken ? { accessToken: existingProps.notionAccessToken } : undefined,
+            notion: existingProps.notionAccessToken
+              ? { accessToken: existingProps.notionAccessToken, refreshToken: existingProps.notionRefreshToken }
+              : undefined,
+            slack: existingProps.slackAccessToken
+              ? { accessToken: existingProps.slackAccessToken, refreshToken: existingProps.slackRefreshToken }
+              : undefined,
           }
         : {}),
       [provider]: { accessToken, refreshToken },
@@ -631,6 +753,8 @@ async function completeAuthorization(
       driveAccessToken: providers.drive?.accessToken,
       driveRefreshToken: providers.drive?.refreshToken,
       notionAccessToken: providers.notion?.accessToken,
+      slackAccessToken: providers.slack?.accessToken,
+      slackRefreshToken: providers.slack?.refreshToken,
       connectedIntegrations,
       workerUrl: new URL(c.req.url).origin,
     } as Props,

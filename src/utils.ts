@@ -122,6 +122,8 @@ export type Props = {
   driveRefreshToken?: string;
   notionAccessToken?: string;
   notionRefreshToken?: string;
+  slackAccessToken?: string;
+  slackRefreshToken?: string;
   connectedIntegrations: string[];
   workerUrl?: string;
 };
