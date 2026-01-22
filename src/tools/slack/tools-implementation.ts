@@ -229,7 +229,7 @@ export const uploadFile: SlackTool<z.infer<typeof UploadFileSchema>> = async ({ 
   if (args.title) options.title = args.title;
   if (args.initialComment) options.initial_comment = args.initialComment;
 
-  const response = await slack.files.upload(options);
+  const response = await slack.files.uploadV2(options);
 
   return {
     content: [{ type: "text", text: JSON.stringify(response, null, 2) }],
