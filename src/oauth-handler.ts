@@ -17,6 +17,19 @@ import {
 
 const app = new Hono<{ Bindings: Env & { OAUTH_PROVIDER: OAuthHelpers } }>();
 
+interface NotionTokenResponse {
+  access_token: string;
+  refresh_token: string;
+  bot_id: string;
+  workspace_name: string;
+  workspace_icon: string;
+  workspace_id: string;
+  owner?: {
+    type: string;
+    name?: any;
+  };
+}
+
 /**
  * Handle direct provider authorization (when user clicks auth link from tool response)
  */
@@ -84,6 +97,7 @@ app.get("/authorize", async (c) => {
     if (requestedScopes.includes("gmail")) integrations.push("Gmail");
     if (requestedScopes.includes("calendar")) integrations.push("Google Calendar");
     if (requestedScopes.includes("drive")) integrations.push("Google Drive");
+    if (requestedScopes.includes("notion")) integrations.push("Notion");
   }
 
   const description = requestedProvider
@@ -198,6 +212,16 @@ async function redirectToProvider(request: Request, stateToken: string, provider
       });
       break;
 
+    case "notion":
+      authUrl = getUpstreamAuthorizeUrl({
+        client_id: env.NOTION_CLIENT_ID,
+        redirect_uri: new URL("/callback/notion", request.url).href,
+        scope: "", // Notion doesn't use scope parameter in the same way
+        state: stateToken,
+        upstream_url: "https://api.notion.com/v1/oauth/authorize",
+      });
+      break;
+
     default:
       throw new Error(`Unsupported provider: ${provider}`);
   }
@@ -218,7 +242,7 @@ app.get("/callback/:provider", async (c) => {
   const provider = c.req.param("provider");
 
   // Supported providers
-  const supported = ["github", "gmail", "calendar", "drive"];
+  const supported = ["github", "gmail", "calendar", "drive", "notion"];
   if (!supported.includes(provider)) {
     return c.text(`Unsupported provider: ${provider}`, 400);
   }
@@ -263,6 +287,40 @@ app.get("/callback/:provider", async (c) => {
       providers: { github: { accessToken } },
       userData: { login, name: name || login, email: email || "" },
       connectedIntegrations: ["github"],
+      clearSessionCookie,
+    });
+  } else if (provider === "notion") {
+    // Notion OAuth - different flow
+    const tokenResponse = await fetch("https://api.notion.com/v1/oauth/token", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Basic ${btoa(`${c.env.NOTION_CLIENT_ID}:${c.env.NOTION_CLIENT_SECRET}`)}`,
+      },
+      body: JSON.stringify({
+        grant_type: "authorization_code",
+        code: c.req.query("code"),
+        redirect_uri: callbackUrl,
+      }),
+    });
+
+    if (!tokenResponse.ok) {
+      const errorText = await tokenResponse.text();
+      console.error("Notion token error:", errorText);
+      return new Response(`Failed to fetch Notion token: ${errorText}`, { status: 500 });
+    }
+
+    const tokenData = (await tokenResponse.json()) as NotionTokenResponse;
+    accessToken = tokenData.access_token;
+    refreshToken = tokenData.refresh_token;
+
+    return completeAuthorization(c, {
+      ...stateData,
+      providers: {
+        ...(stateData.providers || {}),
+        notion: { accessToken, refreshToken },
+      },
+      connectedIntegrations: [...(stateData.connectedIntegrations || []), "notion"],
       clearSessionCookie,
     });
   } else {
@@ -337,6 +395,7 @@ async function completeAuthorization(
       calendarRefreshToken: providers.calendar?.refreshToken,
       driveAccessToken: providers.drive?.accessToken,
       driveRefreshToken: providers.drive?.refreshToken,
+      notionAccessToken: providers.notion?.accessToken,
       connectedIntegrations,
       workerUrl: new URL(c.req.url).origin,
     } as Props,

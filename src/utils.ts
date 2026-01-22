@@ -120,6 +120,8 @@ export type Props = {
   calendarRefreshToken?: string;
   driveAccessToken?: string;
   driveRefreshToken?: string;
+  notionAccessToken?: string;
+  notionRefreshToken?: string;
   connectedIntegrations: string[];
   workerUrl?: string;
 };

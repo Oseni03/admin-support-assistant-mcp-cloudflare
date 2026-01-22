@@ -9,6 +9,8 @@ import { gmailTools } from "./tools/gmail";
 import { createGmailContext } from "./tools/gmail/context";
 import { calendarTools } from "./tools/google-calendar";
 import { createCalendarContext } from "./tools/google-calendar/context";
+import { notionTools } from "./tools/notion";
+import { createNotionContext } from "./tools/notion/context";
 import { Props } from "./utils";
 import { createDriveContext } from "./tools/google-drive/context";
 import { driveTools } from "./tools/google-drive";
@@ -19,12 +21,12 @@ const ALLOWED_USERNAMES = new Set<string>([
 
 export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
   server = new McpServer({
-    name: "Github OAuth Proxy Demo with Gmail & Calendar",
+    name: "Admin Assistant",
     version: "1.0.0",
   });
 
   async init() {
-    // ── List available integrations ───────────────────────────────────────
+    // ── List available integrations ─────────────────────────────────────────
     this.server.tool("listIntegrations", "List all available integrations and their connection status", {}, async () => {
       const integrations = {
         github: {
@@ -47,6 +49,11 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
           email: this.props?.email || null,
           description: "Read, write, and manage files in Google Drive",
         },
+        notion: {
+          connected: !!this.props?.notionAccessToken,
+          user: this.props?.login || null,
+          description: "Access and manage Notion pages and databases",
+        },
         imageGeneration: {
           connected: ALLOWED_USERNAMES.has(this.props!.login),
           enabled: ALLOWED_USERNAMES.has(this.props!.login),
@@ -59,22 +66,25 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
       };
     });
 
-    // ── Always-available basic math tool ──────────────────────────────────
+    // ── Always-available basic math tool ────────────────────────────────────
     this.server.tool("add", "Add two numbers", { a: z.number(), b: z.number() }, async ({ a, b }) => ({
       content: [{ type: "text", text: String(a + b) }],
     }));
 
-    // ── Register GitHub tools ─────────────────────────────────────────────
+    // ── Register GitHub tools ───────────────────────────────────────────────
     await this.registerGitHubTools();
 
-    // ── Register Gmail tools (JIT auth preserved!) ────────────────────────
+    // ── Register Gmail tools (JIT auth preserved!) ──────────────────────────
     await this.registerGmailTools();
 
-    // ── Register Calendar tools (same JIT pattern) ───────────────────
+    // ── Register Calendar tools (same JIT pattern) ──────────────────────────
     await this.registerCalendarTools();
 
     // ── Google Drive tools (JIT auth) ─────────────────────────────────────
     await this.registerDriveTools();
+
+    // ── Register Notion tools (NEW - same JIT pattern) ──────────────────────
+    await this.registerNotionTools();
   }
 
   // ── GitHub tools registration (unchanged) ───────────────────────────────
@@ -107,7 +117,7 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
     );
   }
 
-  // ── Gmail tools registration (unchanged) ───────────────────────────────
+  // ── Gmail tools registration (unchanged) ────────────────────────────────
   private async registerGmailTools() {
     const getGmailContext = (): [any, null] | [null, any] => {
       if (!this.props?.gmailAccessToken) {
@@ -146,7 +156,7 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
     }
   }
 
-  // ── Calendar tools registration (identical pattern) ───────────────
+  // ── Calendar tools registration (identical pattern) ─────────────────────
   private async registerCalendarTools() {
     // Helper: returns [context, null] or [null, authError]
     const getCalendarContext = (): [any, null] | [null, any] => {
@@ -225,7 +235,42 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
     }
   }
 
-  // ── Helpers (unchanged) ────────────────────────────────────────────────
+  // ── NEW: Notion tools registration (same JIT pattern) ───────────────────
+  private async registerNotionTools() {
+    // Helper: returns [context, null] or [null, authError]
+    const getNotionContext = (): [any, null] | [null, any] => {
+      if (!this.props?.notionAccessToken) {
+        return [null, this.authorizationRequired("notion", "Notion integration is required for this action")];
+      }
+
+      return [createNotionContext(this.props.notionAccessToken), null];
+    };
+
+    // Register every Notion tool declaratively
+    for (const [toolName, toolDef] of Object.entries(notionTools)) {
+      this.server.registerTool(
+        toolName,
+        {
+          description: toolDef.description,
+          inputSchema: toolDef.schema.shape ?? {},
+        },
+        async (args: z.infer<typeof toolDef.schema>) => {
+          const [ctx, authError] = getNotionContext();
+          if (!ctx) return authError;
+
+          try {
+            return await toolDef.handler(ctx, args as any);
+          } catch (err: any) {
+            return {
+              content: [{ type: "text", text: `Error: ${err.message}` }],
+            };
+          }
+        },
+      );
+    }
+  }
+
+  // ── Helpers (unchanged) ─────────────────────────────────────────────────
   private generateAuthUrl(provider: string, returnContext?: any): string {
     const baseUrl = this.env.SERVER_URL;
     const url = new URL("/authorize", baseUrl);
