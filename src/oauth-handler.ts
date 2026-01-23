@@ -35,24 +35,69 @@ interface NotionTokenResponse {
  * Handle direct provider authorization (when user clicks auth link from tool response)
  */
 async function handleDirectProviderAuth(c: any, provider: string) {
-  const authHeader = c.req.header("Authorization");
-  const currentToken = authHeader?.replace("Bearer ", "");
+  const githubLogin = c.req.query("user"); // Read from URL parameter
+
+  console.log("=== DIRECT AUTH DEBUG ===");
+  console.log("Provider:", provider);
+  console.log("GitHub login from URL:", githubLogin);
 
   let existingProps: Props | null = null;
-  if (currentToken) {
+
+  if (githubLogin) {
     try {
-      const decoded = await c.env.OAUTH_PROVIDER.verifyToken(currentToken);
-      existingProps = decoded.props as Props;
-    } catch (err) {
-      console.error("Failed to decode existing token:", err);
+      // Try to load existing providers from KV
+      const key = `user-providers::${githubLogin}`;
+      console.log("Looking up KV key:", key);
+
+      const stored = await c.env.PROVIDERS_KV.get(key);
+
+      if (stored) {
+        console.log("✅ Found existing KV data");
+        const data = JSON.parse(stored);
+
+        existingProps = {
+          login: githubLogin,
+          name: data.userData?.name || githubLogin,
+          email: data.userData?.email || "",
+          accessToken: data.providers?.github?.accessToken || "",
+          gmailAccessToken: data.providers?.gmail?.accessToken,
+          gmailRefreshToken: data.providers?.gmail?.refreshToken,
+          calendarAccessToken: data.providers?.calendar?.accessToken,
+          calendarRefreshToken: data.providers?.calendar?.refreshToken,
+          driveAccessToken: data.providers?.drive?.accessToken,
+          driveRefreshToken: data.providers?.drive?.refreshToken,
+          notionAccessToken: data.providers?.notion?.accessToken,
+          slackAccessToken: data.providers?.slack?.accessToken,
+          connectedIntegrations: data.connectedIntegrations || [],
+        } as Props;
+
+        console.log("Loaded existing integrations:", existingProps.connectedIntegrations);
+      } else {
+        console.log("⚠️ No existing KV data - first integration for this user");
+        // First integration - create minimal props with GitHub username
+        existingProps = {
+          login: githubLogin,
+          name: githubLogin,
+          email: "",
+          accessToken: "", // Will be populated if they auth GitHub
+          connectedIntegrations: [],
+        } as Props;
+      }
+    } catch (err: any) {
+      console.error("❌ Failed to load from KV:", err);
     }
+  } else {
+    console.error("❌ No GitHub login in URL - cannot proceed with incremental auth");
+    console.error("User must have authenticated with GitHub first");
   }
+
+  console.log("Final existingProps:", existingProps ? "exists" : "null");
+  console.log("======================");
 
   const stateData = {
     oauthReqInfo: {} as AuthRequest,
     requestedProvider: provider,
     isDirect: true,
-    currentToken,
     existingProps,
   };
 
@@ -308,6 +353,12 @@ app.get("/callback/:provider", async (c) => {
   const callbackUrl = new URL(`/callback/${provider}`, c.req.url).href;
   const existingProps = stateData.existingProps as Props | undefined;
 
+  console.log("=== CALLBACK DEBUG ===");
+  console.log("Provider:", provider);
+  console.log("existingProps:", existingProps ? "exists" : "null");
+  console.log("existingProps.login:", existingProps?.login);
+  console.log("===================");
+
   // Start with GitHub identity if present
   let userData = existingProps
     ? {
@@ -402,8 +453,15 @@ app.get("/callback/:provider", async (c) => {
         }),
       });
 
+      if (!res.ok) {
+        console.error("Slack token exchange HTTP error:", res.status, res.statusText);
+        return c.text(`Slack OAuth error: ${res.statusText}`, 500);
+      }
+
       const data = (await res.json()) as any;
+
       if (!data.ok) {
+        console.error("Slack OAuth API error:", data);
         return c.text(`Slack OAuth error: ${data.error}`, 500);
       }
 
@@ -470,17 +528,30 @@ app.get("/callback/:provider", async (c) => {
   // Enforce GitHub identity anchor
   userData = resolveGitHubIdentity(userData, existingProps);
 
+  console.log("=== KV SAVE DEBUG ===");
+  console.log("Provider:", provider);
+  console.log("userData.login:", userData.login);
+  console.log("mergedProviders:", JSON.stringify(mergedProviders, null, 2));
+  console.log("existingProps:", existingProps ? "exists" : "null");
+  console.log("===================");
+
   // Persist providers ONLY when GitHub exists
   if (userData.login && userData.login !== "unknown-user") {
     try {
       const key = `user-providers::${userData.login}`;
+
+      console.log("KV Key:", key);
+
       const existing = await c.env.PROVIDERS_KV.get(key);
+      console.log("Existing KV data:", existing ? "found" : "not found");
 
       let providersToSave = { ...mergedProviders };
       let integrationsToSave = [...(existingProps?.connectedIntegrations || []), provider];
 
       if (existing) {
         const parsed = JSON.parse(existing);
+        console.log("Parsed existing providers:", JSON.stringify(parsed.providers, null, 2));
+
         providersToSave = {
           ...(parsed.providers || {}),
           ...mergedProviders, // NEW TOKENS WIN
@@ -488,20 +559,44 @@ app.get("/callback/:provider", async (c) => {
         integrationsToSave = [...(parsed.connectedIntegrations || []), provider];
       }
 
+      console.log("Providers to save:", JSON.stringify(providersToSave, null, 2));
+      console.log("Integrations to save:", integrationsToSave);
+
+      const dataToSave = {
+        providers: providersToSave,
+        connectedIntegrations: Array.from(new Set(integrationsToSave)),
+        userData,
+        updatedAt: new Date().toISOString(),
+      };
+
+      console.log("Full data to save:", JSON.stringify(dataToSave, null, 2));
+
       await c.env.PROVIDERS_KV.put(
         key,
-        JSON.stringify({
-          providers: providersToSave,
-          connectedIntegrations: Array.from(new Set(integrationsToSave)),
-          userData,
-          updatedAt: new Date().toISOString(),
-        }),
+        JSON.stringify(dataToSave),
         { expirationTtl: 7776000 }, // 90 days
       );
+
+      console.log("✅ KV save successful");
+
+      // VERIFY IT WAS SAVED
+      const verification = await c.env.PROVIDERS_KV.get(key);
+      console.log("Verification read:", verification ? "✅ Data exists" : "❌ Data missing!");
+      if (verification) {
+        const verifiedData = JSON.parse(verification);
+        console.log("Verified gmail token exists:", !!verifiedData.providers?.gmail?.accessToken);
+      }
     } catch (kvError: any) {
-      console.error("Failed to persist providers to KV:", kvError);
+      console.error("❌ Failed to persist providers to KV:", kvError);
+      console.error("Error details:", {
+        message: kvError.message,
+        stack: kvError.stack,
+        name: kvError.name,
+      });
       // Continue anyway - token is still valid for this session
     }
+  } else {
+    console.error("❌ Cannot save to KV - invalid user login:", userData.login);
   }
 
   return completeAuthorization(c, {

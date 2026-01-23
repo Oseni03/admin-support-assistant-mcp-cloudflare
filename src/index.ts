@@ -414,6 +414,12 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
     const baseUrl = this.env.SERVER_URL;
     const url = new URL("/authorize", baseUrl);
     url.searchParams.set("provider", provider);
+
+    // Include GitHub login in URL so it's available in browser-based auth
+    if (this.props?.login) {
+      url.searchParams.set("user", this.props.login);
+    }
+
     if (returnContext) {
       url.searchParams.set("context", btoa(JSON.stringify(returnContext)));
     }
@@ -446,7 +452,7 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
     };
   }
 
-  // ── New: Context getters that load from KV ─────────────────
+  // Fixed context getters that check KV FIRST, then fall back to props
 
   private async getGmailContext(): Promise<[any, null] | [null, any]> {
     const githubLogin = this.props?.login;
@@ -454,22 +460,37 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
       return [null, this.authorizationRequired("gmail", "No GitHub user found.")];
     }
 
+    // 1. Try to load from KV first (incremental auth)
     const key = `user-providers::${githubLogin}`;
-    const stored = await this.env.PROVIDERS_KV.get(key);
-    if (!stored) {
-      return [null, this.authorizationRequired("gmail", "Gmail not connected.")];
-    }
-
-    let data;
+    let stored;
     try {
-      data = JSON.parse(stored);
-    } catch {
-      return [null, { content: [{ type: "text", text: "Failed to load stored integrations." }] }];
+      stored = await this.env.PROVIDERS_KV.get(key);
+    } catch (error: any) {
+      console.error("Failed to read from KV:", error);
     }
 
-    const gmail = data.providers?.gmail;
+    let gmail;
+
+    if (stored) {
+      try {
+        const data = JSON.parse(stored);
+        gmail = data.providers?.gmail;
+      } catch (error: any) {
+        console.error("Failed to parse KV data:", error);
+      }
+    }
+
+    // 2. Fall back to props (initial auth)
+    if (!gmail && this.props?.gmailAccessToken) {
+      gmail = {
+        accessToken: this.props.gmailAccessToken,
+        refreshToken: this.props.gmailRefreshToken,
+      };
+    }
+
+    // 3. If still no token, require auth
     if (!gmail?.accessToken) {
-      return [null, this.authorizationRequired("gmail", "Gmail not connected.")];
+      return [null, this.authorizationRequired("gmail", "Gmail not connected. Please authorize Gmail integration.")];
     }
 
     const oauth = new OAuth2Client();
@@ -488,21 +509,33 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
     }
 
     const key = `user-providers::${githubLogin}`;
-    const stored = await this.env.PROVIDERS_KV.get(key);
-    if (!stored) {
-      return [null, this.authorizationRequired("calendar", "Google Calendar not connected.")];
-    }
-
-    let data;
+    let stored;
     try {
-      data = JSON.parse(stored);
-    } catch {
-      return [null, { content: [{ type: "text", text: "Failed to load stored integrations." }] }];
+      stored = await this.env.PROVIDERS_KV.get(key);
+    } catch (error: any) {
+      console.error("Failed to read from KV:", error);
     }
 
-    const calendar = data.providers?.calendar;
+    let calendar;
+
+    if (stored) {
+      try {
+        const data = JSON.parse(stored);
+        calendar = data.providers?.calendar;
+      } catch (error: any) {
+        console.error("Failed to parse KV data:", error);
+      }
+    }
+
+    if (!calendar && this.props?.calendarAccessToken) {
+      calendar = {
+        accessToken: this.props.calendarAccessToken,
+        refreshToken: this.props.calendarRefreshToken,
+      };
+    }
+
     if (!calendar?.accessToken) {
-      return [null, this.authorizationRequired("calendar", "Google Calendar not connected.")];
+      return [null, this.authorizationRequired("calendar", "Google Calendar not connected. Please authorize Calendar integration.")];
     }
 
     const oauth = new OAuth2Client();
@@ -521,21 +554,33 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
     }
 
     const key = `user-providers::${githubLogin}`;
-    const stored = await this.env.PROVIDERS_KV.get(key);
-    if (!stored) {
-      return [null, this.authorizationRequired("drive", "Google Drive not connected.")];
-    }
-
-    let data;
+    let stored;
     try {
-      data = JSON.parse(stored);
-    } catch {
-      return [null, { content: [{ type: "text", text: "Failed to load stored integrations." }] }];
+      stored = await this.env.PROVIDERS_KV.get(key);
+    } catch (error: any) {
+      console.error("Failed to read from KV:", error);
     }
 
-    const drive = data.providers?.drive;
+    let drive;
+
+    if (stored) {
+      try {
+        const data = JSON.parse(stored);
+        drive = data.providers?.drive;
+      } catch (error: any) {
+        console.error("Failed to parse KV data:", error);
+      }
+    }
+
+    if (!drive && this.props?.driveAccessToken) {
+      drive = {
+        accessToken: this.props.driveAccessToken,
+        refreshToken: this.props.driveRefreshToken,
+      };
+    }
+
     if (!drive?.accessToken) {
-      return [null, this.authorizationRequired("drive", "Google Drive not connected.")];
+      return [null, this.authorizationRequired("drive", "Google Drive not connected. Please authorize Drive integration.")];
     }
 
     const oauth = new OAuth2Client();
@@ -554,21 +599,33 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
     }
 
     const key = `user-providers::${githubLogin}`;
-    const stored = await this.env.PROVIDERS_KV.get(key);
-    if (!stored) {
-      return [null, this.authorizationRequired("notion", "Notion not connected.")];
-    }
-
-    let data;
+    let stored;
     try {
-      data = JSON.parse(stored);
-    } catch {
-      return [null, { content: [{ type: "text", text: "Failed to load stored integrations." }] }];
+      stored = await this.env.PROVIDERS_KV.get(key);
+    } catch (error: any) {
+      console.error("Failed to read from KV:", error);
     }
 
-    const notion = data.providers?.notion;
+    let notion;
+
+    if (stored) {
+      try {
+        const data = JSON.parse(stored);
+        notion = data.providers?.notion;
+      } catch (error: any) {
+        console.error("Failed to parse KV data:", error);
+      }
+    }
+
+    if (!notion && this.props?.notionAccessToken) {
+      notion = {
+        accessToken: this.props.notionAccessToken,
+        refreshToken: this.props.notionRefreshToken,
+      };
+    }
+
     if (!notion?.accessToken) {
-      return [null, this.authorizationRequired("notion", "Notion not connected.")];
+      return [null, this.authorizationRequired("notion", "Notion not connected. Please authorize Notion integration.")];
     }
 
     return [createNotionContext(notion.accessToken), null];
@@ -581,21 +638,33 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
     }
 
     const key = `user-providers::${githubLogin}`;
-    const stored = await this.env.PROVIDERS_KV.get(key);
-    if (!stored) {
-      return [null, this.authorizationRequired("slack", "Slack not connected.")];
-    }
-
-    let data;
+    let stored;
     try {
-      data = JSON.parse(stored);
-    } catch {
-      return [null, { content: [{ type: "text", text: "Failed to load stored integrations." }] }];
+      stored = await this.env.PROVIDERS_KV.get(key);
+    } catch (error: any) {
+      console.error("Failed to read from KV:", error);
     }
 
-    const slack = data.providers?.slack;
+    let slack;
+
+    if (stored) {
+      try {
+        const data = JSON.parse(stored);
+        slack = data.providers?.slack;
+      } catch (error: any) {
+        console.error("Failed to parse KV data:", error);
+      }
+    }
+
+    if (!slack && this.props?.slackAccessToken) {
+      slack = {
+        accessToken: this.props.slackAccessToken,
+        refreshToken: this.props.slackRefreshToken,
+      };
+    }
+
     if (!slack?.accessToken) {
-      return [null, this.authorizationRequired("slack", "Slack not connected.")];
+      return [null, this.authorizationRequired("slack", "Slack not connected. Please authorize Slack integration.")];
     }
 
     return [createSlackContext(slack.accessToken), null];
