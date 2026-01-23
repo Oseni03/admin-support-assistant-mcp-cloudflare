@@ -1,15 +1,5 @@
 /**
  * Constructs an authorization URL for an upstream service.
- *
- * @param {Object} options
- * @param {string} options.upstream_url - The base URL of the upstream service.
- * @param {string} options.client_id - The client ID of the application.
- * @param {string} options.redirect_uri - The redirect URI of the application.
- * @param {string} options.access_type - The access type of the application.
- * @param {string} options.prompt - The prompt of the application.
- * @param {string} [options.state] - The state parameter.
- *
- * @returns {string} The authorization URL.
  */
 export function getUpstreamAuthorizeUrl(params: {
   upstream_url: string;
@@ -38,16 +28,19 @@ export function getUpstreamAuthorizeUrl(params: {
 }
 
 /**
+ * Token response structure
+ */
+export interface TokenResponse {
+  access_token: string;
+  refresh_token?: string;
+  expires_in?: number;
+  token_type?: string;
+  scope?: string;
+}
+
+/**
  * Fetches an authorization token from an upstream service.
- *
- * @param {Object} options
- * @param {string} options.client_id - The client ID of the application.
- * @param {string} options.client_secret - The client secret of the application.
- * @param {string} options.code - The authorization code.
- * @param {string} options.redirect_uri - The redirect URI of the application.
- * @param {string} options.upstream_url - The token endpoint URL of the upstream service.
- *
- * @returns {Promise<[string, null] | [null, Response]>} A promise that resolves to an array containing the access token or an error response.
+ * Returns the full token response object for providers that need refresh tokens.
  */
 export async function fetchUpstreamAuthToken({
   client_id,
@@ -61,7 +54,7 @@ export async function fetchUpstreamAuthToken({
   client_secret: string;
   redirect_uri: string;
   client_id: string;
-}): Promise<[any, null] | [null, Response]> {
+}): Promise<[TokenResponse, null] | [null, Response]> {
   if (!code) {
     return [null, new Response("Missing code", { status: 400 })];
   }
@@ -77,7 +70,7 @@ export async function fetchUpstreamAuthToken({
   console.log("Token request:", {
     url: upstream_url,
     redirect_uri,
-    client_id: client_id.substring(0, 10) + "...", // partial for security
+    client_id: client_id.substring(0, 10) + "...",
     code_prefix: code.substring(0, 10) + "...",
   });
 
@@ -93,31 +86,45 @@ export async function fetchUpstreamAuthToken({
     const errorText = await resp.text();
     console.error("Token endpoint error:", {
       status: resp.status,
+      statusText: resp.statusText,
       body: errorText,
     });
     return [null, new Response(`Failed to fetch access token: ${errorText}`, { status: 500 })];
   }
 
-  // GitHub returns form data, Google returns JSON
+  // Parse response based on Content-Type
   const contentType = resp.headers.get("content-type") || "";
+  let tokenData: TokenResponse;
 
-  if (contentType.includes("application/json")) {
-    // Google OAuth response
-    const data = await resp.json();
-    return [data, null];
-  } else {
-    // GitHub OAuth response (form data)
-    const body = await resp.formData();
-    const accessToken = body.get("access_token") as string;
-    if (!accessToken) {
-      return [null, new Response("Missing access token", { status: 400 })];
+  try {
+    if (contentType.includes("application/json")) {
+      // Google and most modern OAuth providers return JSON
+      tokenData = await resp.json();
+    } else {
+      // GitHub returns form-urlencoded
+      const formData = await resp.formData();
+      tokenData = {
+        access_token: formData.get("access_token") as string,
+        refresh_token: formData.get("refresh_token") as string | undefined,
+        expires_in: formData.get("expires_in") ? parseInt(formData.get("expires_in") as string) : undefined,
+        token_type: formData.get("token_type") as string | undefined,
+        scope: formData.get("scope") as string | undefined,
+      };
     }
-    return [accessToken, null];
+  } catch (parseError: any) {
+    console.error("Failed to parse token response:", parseError);
+    return [null, new Response("Failed to parse token response", { status: 500 })];
   }
+
+  if (!tokenData.access_token) {
+    console.error("Missing access_token in response:", tokenData);
+    return [null, new Response("Missing access token in response", { status: 400 })];
+  }
+
+  return [tokenData, null];
 }
 
 // Context from the auth process, encrypted & stored in the auth token
-// and provided to the DurableMCP as this.props
 export type Props = {
   login: string;
   name: string;
@@ -145,24 +152,33 @@ export async function refreshGoogleToken(params: {
   client_secret: string;
   refresh_token: string;
 }): Promise<string | null> {
-  const response = await fetch("https://oauth2.googleapis.com/token", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/x-www-form-urlencoded",
-    },
-    body: new URLSearchParams({
-      client_id: params.client_id,
-      client_secret: params.client_secret,
-      refresh_token: params.refresh_token,
-      grant_type: "refresh_token",
-    }),
-  });
+  try {
+    const response = await fetch("https://oauth2.googleapis.com/token", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams({
+        client_id: params.client_id,
+        client_secret: params.client_secret,
+        refresh_token: params.refresh_token,
+        grant_type: "refresh_token",
+      }),
+    });
 
-  if (!response.ok) {
-    console.error("Token refresh failed:", await response.text());
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error("Token refresh failed:", {
+        status: response.status,
+        body: errorText,
+      });
+      return null;
+    }
+
+    const data = (await response.json()) as Record<string, any>;
+    return data.access_token;
+  } catch (error: any) {
+    console.error("Token refresh error:", error);
     return null;
   }
-
-  const data = (await response.json()) as Record<string, any>;
-  return data.access_token;
 }

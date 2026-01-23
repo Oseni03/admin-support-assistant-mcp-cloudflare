@@ -278,7 +278,6 @@ function resolveGitHubIdentity(userData: { login: string; name: string; email: s
       email: existingProps.email || userData.email,
     };
   }
-
   return userData;
 }
 
@@ -301,6 +300,7 @@ app.get("/callback/:provider", async (c) => {
     stateData = result.data;
     clearSessionCookie = result.clearCookie;
   } catch (err: any) {
+    console.error("State validation error:", err);
     if (err instanceof OAuthError) return err.toResponse();
     return c.text("Invalid OAuth state", 400);
   }
@@ -308,9 +308,7 @@ app.get("/callback/:provider", async (c) => {
   const callbackUrl = new URL(`/callback/${provider}`, c.req.url).href;
   const existingProps = stateData.existingProps as Props | undefined;
 
-  // -----------------------------
   // Start with GitHub identity if present
-  // -----------------------------
   let userData = existingProps
     ? {
         login: existingProps.login,
@@ -323,159 +321,187 @@ app.get("/callback/:provider", async (c) => {
         email: "",
       };
 
-  // -----------------------------
   // Start with existing providers
-  // -----------------------------
-  const mergedProviders: Record<string, { accessToken: string; refreshToken?: string }> = {
-    ...(existingProps
-      ? {
-          github: existingProps.accessToken ? { accessToken: existingProps.accessToken } : undefined,
-          gmail: existingProps.gmailAccessToken
-            ? {
-                accessToken: existingProps.gmailAccessToken,
-                refreshToken: existingProps.gmailRefreshToken,
-              }
-            : undefined,
-          calendar: existingProps.calendarAccessToken
-            ? {
-                accessToken: existingProps.calendarAccessToken,
-                refreshToken: existingProps.calendarRefreshToken,
-              }
-            : undefined,
-          drive: existingProps.driveAccessToken
-            ? {
-                accessToken: existingProps.driveAccessToken,
-                refreshToken: existingProps.driveRefreshToken,
-              }
-            : undefined,
-          notion: existingProps.notionAccessToken
-            ? {
-                accessToken: existingProps.notionAccessToken,
-                refreshToken: existingProps.notionRefreshToken,
-              }
-            : undefined,
-          slack: existingProps.slackAccessToken ? { accessToken: existingProps.slackAccessToken } : undefined,
-        }
-      : {}),
-  };
+  const mergedProviders: Record<string, { accessToken: string; refreshToken?: string }> = {};
 
-  let accessToken: string;
-  let refreshToken: string | undefined;
+  if (existingProps) {
+    if (existingProps.accessToken) {
+      mergedProviders.github = { accessToken: existingProps.accessToken };
+    }
+    if (existingProps.gmailAccessToken) {
+      mergedProviders.gmail = {
+        accessToken: existingProps.gmailAccessToken,
+        refreshToken: existingProps.gmailRefreshToken,
+      };
+    }
+    if (existingProps.calendarAccessToken) {
+      mergedProviders.calendar = {
+        accessToken: existingProps.calendarAccessToken,
+        refreshToken: existingProps.calendarRefreshToken,
+      };
+    }
+    if (existingProps.driveAccessToken) {
+      mergedProviders.drive = {
+        accessToken: existingProps.driveAccessToken,
+        refreshToken: existingProps.driveRefreshToken,
+      };
+    }
+    if (existingProps.notionAccessToken) {
+      mergedProviders.notion = {
+        accessToken: existingProps.notionAccessToken,
+        refreshToken: existingProps.notionRefreshToken,
+      };
+    }
+    if (existingProps.slackAccessToken) {
+      mergedProviders.slack = {
+        accessToken: existingProps.slackAccessToken,
+        refreshToken: existingProps.slackRefreshToken,
+      };
+    }
+  }
 
   // =====================================================
   // Provider-specific token exchange
   // =====================================================
-  if (provider === "github") {
-    const [tokenResult, err] = await fetchUpstreamAuthToken({
-      client_id: c.env.GITHUB_CLIENT_ID,
-      client_secret: c.env.GITHUB_CLIENT_SECRET,
-      code: c.req.query("code"),
-      redirect_uri: callbackUrl,
-      upstream_url: "https://github.com/login/oauth/access_token",
-    });
-    if (err) return err;
-
-    accessToken = typeof tokenResult === "string" ? tokenResult : tokenResult.access_token;
-
-    const octokit = new Octokit({ auth: accessToken });
-    const { data: ghUser } = await octokit.rest.users.getAuthenticated();
-
-    userData = {
-      login: ghUser.login,
-      name: ghUser.name || ghUser.login,
-      email: ghUser.email || "",
-    };
-
-    mergedProviders.github = { accessToken };
-  } else if (provider === "slack") {
-    const res = await fetch("https://slack.com/api/oauth.v2.access", {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        client_id: c.env.SLACK_CLIENT_ID,
-        client_secret: c.env.SLACK_CLIENT_SECRET,
-        code: c.req.query("code") || "",
-        redirect_uri: callbackUrl,
-      }),
-    });
-
-    const data = (await res.json()) as any;
-    if (!data.ok) {
-      return c.text(`Slack OAuth error: ${data.error}`, 500);
-    }
-
-    mergedProviders.slack = { accessToken: data.access_token };
-  } else if (provider === "notion") {
-    const res = await fetch("https://api.notion.com/v1/oauth/token", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Basic ${btoa(`${c.env.NOTION_CLIENT_ID}:${c.env.NOTION_CLIENT_SECRET}`)}`,
-      },
-      body: JSON.stringify({
-        grant_type: "authorization_code",
+  try {
+    if (provider === "github") {
+      const [tokenResult, err] = await fetchUpstreamAuthToken({
+        client_id: c.env.GITHUB_CLIENT_ID,
+        client_secret: c.env.GITHUB_CLIENT_SECRET,
         code: c.req.query("code"),
         redirect_uri: callbackUrl,
-      }),
-    });
+        upstream_url: "https://github.com/login/oauth/access_token",
+      });
 
-    const data = (await res.json()) as any;
-    mergedProviders.notion = {
-      accessToken: data.access_token,
-      refreshToken: data.refresh_token,
-    };
-  } else {
-    // Google (gmail / calendar / drive)
-    const [tokenData, err] = await fetchUpstreamAuthToken({
-      client_id: c.env.GOOGLE_CLIENT_ID,
-      client_secret: c.env.GOOGLE_CLIENT_SECRET,
-      code: c.req.query("code"),
-      redirect_uri: callbackUrl,
-      upstream_url: "https://oauth2.googleapis.com/token",
-    });
+      if (err) {
+        console.error("GitHub token exchange failed:", err);
+        return err;
+      }
 
-    if (err) return err;
+      const accessToken = tokenResult.access_token;
 
-    mergedProviders[provider] = {
-      accessToken: tokenData.access_token,
-      refreshToken: tokenData.refresh_token,
-    };
+      const octokit = new Octokit({ auth: accessToken });
+      const { data: ghUser } = await octokit.rest.users.getAuthenticated();
+
+      userData = {
+        login: ghUser.login,
+        name: ghUser.name || ghUser.login,
+        email: ghUser.email || "",
+      };
+
+      mergedProviders.github = { accessToken };
+    } else if (provider === "slack") {
+      const res = await fetch("https://slack.com/api/oauth.v2.access", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          client_id: c.env.SLACK_CLIENT_ID,
+          client_secret: c.env.SLACK_CLIENT_SECRET,
+          code: c.req.query("code") || "",
+          redirect_uri: callbackUrl,
+        }),
+      });
+
+      const data = (await res.json()) as any;
+      if (!data.ok) {
+        return c.text(`Slack OAuth error: ${data.error}`, 500);
+      }
+
+      mergedProviders.slack = {
+        accessToken: data.access_token,
+        refreshToken: data.refresh_token,
+      };
+    } else if (provider === "notion") {
+      const res = await fetch("https://api.notion.com/v1/oauth/token", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Basic ${btoa(`${c.env.NOTION_CLIENT_ID}:${c.env.NOTION_CLIENT_SECRET}`)}`,
+        },
+        body: JSON.stringify({
+          grant_type: "authorization_code",
+          code: c.req.query("code"),
+          redirect_uri: callbackUrl,
+        }),
+      });
+
+      if (!res.ok) {
+        const errorText = await res.text();
+        console.error("Notion token exchange failed:", res.status, errorText);
+        return c.text(`Notion OAuth error: ${errorText}`, 500);
+      }
+
+      const data = (await res.json()) as any;
+
+      if (!data.access_token) {
+        console.error("Notion response missing access_token:", data);
+        return c.text("Notion OAuth error: missing access token", 500);
+      }
+
+      mergedProviders.notion = {
+        accessToken: data.access_token,
+        refreshToken: data.refresh_token,
+      };
+    } else {
+      // Google providers (gmail / calendar / drive)
+      const [tokenData, err] = await fetchUpstreamAuthToken({
+        client_id: c.env.GOOGLE_CLIENT_ID,
+        client_secret: c.env.GOOGLE_CLIENT_SECRET,
+        code: c.req.query("code"),
+        redirect_uri: callbackUrl,
+        upstream_url: "https://oauth2.googleapis.com/token",
+      });
+
+      if (err) {
+        console.error(`${provider} token exchange failed:`, err);
+        return err;
+      }
+
+      mergedProviders[provider] = {
+        accessToken: tokenData.access_token,
+        refreshToken: tokenData.refresh_token,
+      };
+    }
+  } catch (error: any) {
+    console.error(`Error during ${provider} token exchange:`, error);
+    return c.text(`Internal server error during ${provider} authorization: ${error.message}`, 500);
   }
 
-  // -----------------------------
   // Enforce GitHub identity anchor
-  // -----------------------------
   userData = resolveGitHubIdentity(userData, existingProps);
 
-  // =====================================================
   // Persist providers ONLY when GitHub exists
-  // =====================================================
   if (userData.login && userData.login !== "unknown-user") {
-    const key = `user-providers::${userData.login}`;
-    const existing = await c.env.PROVIDERS_KV.get(key);
+    try {
+      const key = `user-providers::${userData.login}`;
+      const existing = await c.env.PROVIDERS_KV.get(key);
 
-    let providersToSave = { ...mergedProviders };
-    let integrationsToSave = [...(existingProps?.connectedIntegrations || []), provider];
+      let providersToSave = { ...mergedProviders };
+      let integrationsToSave = [...(existingProps?.connectedIntegrations || []), provider];
 
-    if (existing) {
-      const parsed = JSON.parse(existing);
-      providersToSave = {
-        ...(parsed.providers || {}),
-        ...mergedProviders, // NEW TOKENS WIN
-      };
-      integrationsToSave = [...(parsed.connectedIntegrations || []), provider];
+      if (existing) {
+        const parsed = JSON.parse(existing);
+        providersToSave = {
+          ...(parsed.providers || {}),
+          ...mergedProviders, // NEW TOKENS WIN
+        };
+        integrationsToSave = [...(parsed.connectedIntegrations || []), provider];
+      }
+
+      await c.env.PROVIDERS_KV.put(
+        key,
+        JSON.stringify({
+          providers: providersToSave,
+          connectedIntegrations: Array.from(new Set(integrationsToSave)),
+          userData,
+          updatedAt: new Date().toISOString(),
+        }),
+        { expirationTtl: 7776000 }, // 90 days
+      );
+    } catch (kvError: any) {
+      console.error("Failed to persist providers to KV:", kvError);
+      // Continue anyway - token is still valid for this session
     }
-
-    await c.env.PROVIDERS_KV.put(
-      key,
-      JSON.stringify({
-        providers: providersToSave,
-        connectedIntegrations: Array.from(new Set(integrationsToSave)),
-        userData,
-        updatedAt: new Date().toISOString(),
-      }),
-      { expirationTtl: 7776000 },
-    );
   }
 
   return completeAuthorization(c, {
