@@ -7,20 +7,21 @@ declare namespace Cloudflare {
 		durableNamespaces: "MyMCP";
 	}
 	interface Env {
-		OAUTH_KV: KVNamespace;
-		GITHUB_CLIENT_ID: string;
-		GITHUB_CLIENT_SECRET: string;
-		COOKIE_ENCRYPTION_KEY: string;
-		SERVER_URL: string;
-		GOOGLE_CLIENT_ID: string;
-		GOOGLE_CLIENT_SECRET: string;
-		NOTION_CLIENT_ID: string;
-		NOTION_CLIENT_SECRET: string;
-		SLACK_CLIENT_ID: string;
-		SLACK_CLIENT_SECRET: string;
-		MCP_OBJECT: DurableObjectNamespace<import("./src/index").MyMCP>;
-		AI: Ai;
-	}
+    OAUTH_KV: KVNamespace;
+    PROVIDERS_KV: KVNamespace;
+    GITHUB_CLIENT_ID: string;
+    GITHUB_CLIENT_SECRET: string;
+    COOKIE_ENCRYPTION_KEY: string;
+    SERVER_URL: string;
+    GOOGLE_CLIENT_ID: string;
+    GOOGLE_CLIENT_SECRET: string;
+    NOTION_CLIENT_ID: string;
+    NOTION_CLIENT_SECRET: string;
+    SLACK_CLIENT_ID: string;
+    SLACK_CLIENT_SECRET: string;
+    MCP_OBJECT: DurableObjectNamespace<import("./src/index").MyMCP>;
+    AI: Ai;
+  }
 }
 interface Env extends Cloudflare.Env {}
 

@@ -39,38 +39,72 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
         mimeType: "text/html",
       },
       async () => {
-        const integrations = {
+        const githubLogin = this.props?.login || null;
+
+        let integrations = {
           github: {
             connected: !!this.props?.accessToken,
-            user: this.props?.login || null,
+            user: githubLogin,
             description: "Access GitHub repositories and user information",
           },
           gmail: {
-            connected: !!this.props?.gmailAccessToken,
+            connected: false,
             email: this.props?.email || null,
             description: "Send, read, and manage Google emails",
           },
           calendar: {
-            connected: !!this.props?.calendarAccessToken,
+            connected: false,
             email: this.props?.email || null,
             description: "Manage Google Calendar events and calendars",
           },
           drive: {
-            connected: !!this.props?.driveAccessToken,
+            connected: false,
             email: this.props?.email || null,
             description: "Read, write, and manage files in Google Drive",
           },
           notion: {
-            connected: !!this.props?.notionAccessToken,
-            user: this.props?.login || null,
+            connected: false,
+            user: githubLogin || null,
             description: "Access and manage Notion pages and databases",
           },
           slack: {
-            connected: !!this.props?.slackAccessToken,
-            user: this.props?.login || null,
+            connected: false,
+            user: githubLogin || null,
             description: "Send messages and manage Slack workspace",
           },
         };
+
+        // Load from KV for non-GitHub integrations
+        if (githubLogin) {
+          const key = `user-providers::${githubLogin}`;
+          const stored = await this.env.PROVIDERS_KV.get(key);
+          if (stored) {
+            const data = JSON.parse(stored);
+            integrations = {
+              ...integrations,
+              gmail: {
+                ...integrations.gmail,
+                connected: !!data.providers?.gmail?.accessToken,
+              },
+              calendar: {
+                ...integrations.calendar,
+                connected: !!data.providers?.calendar?.accessToken,
+              },
+              drive: {
+                ...integrations.drive,
+                connected: !!data.providers?.drive?.accessToken,
+              },
+              notion: {
+                ...integrations.notion,
+                connected: !!data.providers?.notion?.accessToken,
+              },
+              slack: {
+                ...integrations.slack,
+                connected: !!data.providers?.slack?.accessToken,
+              },
+            };
+          }
+        }
 
         const integrationsWithUrls = Object.entries(integrations).map(([name, info]) => ({
           name,
@@ -251,22 +285,8 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
     );
   }
 
-  // ── Gmail tools registration (unchanged) ────────────────────────────────
+  // ── Gmail tools registration ────────────────────────────────
   private async registerGmailTools() {
-    const getGmailContext = (): [any, null] | [null, any] => {
-      if (!this.props?.gmailAccessToken) {
-        return [null, this.authorizationRequired("gmail", "Gmail integration is required for this action")];
-      }
-
-      const oauth = new OAuth2Client();
-      oauth.setCredentials({
-        access_token: this.props.gmailAccessToken,
-        refresh_token: this.props.gmailRefreshToken,
-      });
-
-      return [createGmailContext(oauth), null];
-    };
-
     for (const [toolName, toolDef] of Object.entries(gmailTools)) {
       this.server.registerTool(
         toolName,
@@ -275,7 +295,7 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
           inputSchema: toolDef.schema.shape ?? {},
         },
         async (args: z.infer<typeof toolDef.schema>) => {
-          const [ctx, authError] = getGmailContext();
+          const [ctx, authError] = await this.getGmailContext();
           if (!ctx) return authError;
 
           try {
@@ -290,24 +310,8 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
     }
   }
 
-  // ── Calendar tools registration (identical pattern) ─────────────────────
+  // ── Calendar tools registration ─────────────────────
   private async registerCalendarTools() {
-    // Helper: returns [context, null] or [null, authError]
-    const getCalendarContext = (): [any, null] | [null, any] => {
-      if (!this.props?.calendarAccessToken) {
-        return [null, this.authorizationRequired("calendar", "Google Calendar integration is required for this action")];
-      }
-
-      const oauth = new OAuth2Client();
-      oauth.setCredentials({
-        access_token: this.props.calendarAccessToken,
-        refresh_token: this.props.calendarRefreshToken,
-      });
-
-      return [createCalendarContext(oauth), null];
-    };
-
-    // Register every Calendar tool declaratively
     for (const [toolName, toolDef] of Object.entries(calendarTools)) {
       this.server.registerTool(
         toolName,
@@ -316,7 +320,7 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
           inputSchema: toolDef.schema.shape ?? {},
         },
         async (args: z.infer<typeof toolDef.schema>) => {
-          const [ctx, authError] = getCalendarContext();
+          const [ctx, authError] = await this.getCalendarContext();
           if (!ctx) return authError;
 
           try {
@@ -332,20 +336,6 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
   }
 
   private async registerDriveTools() {
-    const getDriveContext = (): [any, null] | [null, any] => {
-      if (!this.props?.driveAccessToken) {
-        return [null, this.authorizationRequired("drive", "Google Drive integration is required for this action")];
-      }
-
-      const oauth = new OAuth2Client();
-      oauth.setCredentials({
-        access_token: this.props.driveAccessToken,
-        refresh_token: this.props.driveRefreshToken,
-      });
-
-      return [createDriveContext(oauth), null];
-    };
-
     for (const [toolName, toolDef] of Object.entries(driveTools)) {
       this.server.registerTool(
         toolName,
@@ -354,7 +344,7 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
           inputSchema: toolDef.schema.shape ?? {},
         },
         async (args: z.infer<typeof toolDef.schema>) => {
-          const [ctx, authError] = getDriveContext();
+          const [ctx, authError] = await this.getDriveContext();
           if (!ctx) return authError;
 
           try {
@@ -369,18 +359,8 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
     }
   }
 
-  // ── NEW: Notion tools registration (same JIT pattern) ───────────────────
+  // ── Notion tools registration ───────────────────
   private async registerNotionTools() {
-    // Helper: returns [context, null] or [null, authError]
-    const getNotionContext = (): [any, null] | [null, any] => {
-      if (!this.props?.notionAccessToken) {
-        return [null, this.authorizationRequired("notion", "Notion integration is required for this action")];
-      }
-
-      return [createNotionContext(this.props.notionAccessToken), null];
-    };
-
-    // Register every Notion tool declaratively
     for (const [toolName, toolDef] of Object.entries(notionTools)) {
       this.server.registerTool(
         toolName,
@@ -389,7 +369,7 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
           inputSchema: toolDef.schema.shape ?? {},
         },
         async (args: z.infer<typeof toolDef.schema>) => {
-          const [ctx, authError] = getNotionContext();
+          const [ctx, authError] = await this.getNotionContext();
           if (!ctx) return authError;
 
           try {
@@ -404,18 +384,8 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
     }
   }
 
-  // ── NEW: Slack tools registration (same JIT pattern) ────────────────────
+  // ── Slack tools registration ────────────────────
   private async registerSlackTools() {
-    // Helper: returns [context, null] or [null, authError]
-    const getSlackContext = (): [any, null] | [null, any] => {
-      if (!this.props?.slackAccessToken) {
-        return [null, this.authorizationRequired("slack", "Slack integration is required for this action")];
-      }
-
-      return [createSlackContext(this.props.slackAccessToken), null];
-    };
-
-    // Register every Slack tool declaratively
     for (const [toolName, toolDef] of Object.entries(slackTools)) {
       this.server.registerTool(
         toolName,
@@ -424,7 +394,7 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
           inputSchema: toolDef.schema.shape ?? {},
         },
         async (args: z.infer<typeof toolDef.schema>) => {
-          const [ctx, authError] = getSlackContext();
+          const [ctx, authError] = await this.getSlackContext();
           if (!ctx) return authError;
 
           try {
@@ -439,7 +409,7 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
     }
   }
 
-  // ── Helpers (unchanged) ─────────────────────────────────────────────────
+  // ── Helpers ─────────────────────────────────────────────────
   private generateAuthUrl(provider: string, returnContext?: any): string {
     const baseUrl = this.env.SERVER_URL;
     const url = new URL("/authorize", baseUrl);
@@ -474,6 +444,161 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
         },
       ],
     };
+  }
+
+  // ── New: Context getters that load from KV ─────────────────
+
+  private async getGmailContext(): Promise<[any, null] | [null, any]> {
+    const githubLogin = this.props?.login;
+    if (!githubLogin) {
+      return [null, this.authorizationRequired("gmail", "No GitHub user found.")];
+    }
+
+    const key = `user-providers::${githubLogin}`;
+    const stored = await this.env.PROVIDERS_KV.get(key);
+    if (!stored) {
+      return [null, this.authorizationRequired("gmail", "Gmail not connected.")];
+    }
+
+    let data;
+    try {
+      data = JSON.parse(stored);
+    } catch {
+      return [null, { content: [{ type: "text", text: "Failed to load stored integrations." }] }];
+    }
+
+    const gmail = data.providers?.gmail;
+    if (!gmail?.accessToken) {
+      return [null, this.authorizationRequired("gmail", "Gmail not connected.")];
+    }
+
+    const oauth = new OAuth2Client();
+    oauth.setCredentials({
+      access_token: gmail.accessToken,
+      refresh_token: gmail.refreshToken,
+    });
+
+    return [createGmailContext(oauth), null];
+  }
+
+  private async getCalendarContext(): Promise<[any, null] | [null, any]> {
+    const githubLogin = this.props?.login;
+    if (!githubLogin) {
+      return [null, this.authorizationRequired("calendar", "No GitHub user found.")];
+    }
+
+    const key = `user-providers::${githubLogin}`;
+    const stored = await this.env.PROVIDERS_KV.get(key);
+    if (!stored) {
+      return [null, this.authorizationRequired("calendar", "Google Calendar not connected.")];
+    }
+
+    let data;
+    try {
+      data = JSON.parse(stored);
+    } catch {
+      return [null, { content: [{ type: "text", text: "Failed to load stored integrations." }] }];
+    }
+
+    const calendar = data.providers?.calendar;
+    if (!calendar?.accessToken) {
+      return [null, this.authorizationRequired("calendar", "Google Calendar not connected.")];
+    }
+
+    const oauth = new OAuth2Client();
+    oauth.setCredentials({
+      access_token: calendar.accessToken,
+      refresh_token: calendar.refreshToken,
+    });
+
+    return [createCalendarContext(oauth), null];
+  }
+
+  private async getDriveContext(): Promise<[any, null] | [null, any]> {
+    const githubLogin = this.props?.login;
+    if (!githubLogin) {
+      return [null, this.authorizationRequired("drive", "No GitHub user found.")];
+    }
+
+    const key = `user-providers::${githubLogin}`;
+    const stored = await this.env.PROVIDERS_KV.get(key);
+    if (!stored) {
+      return [null, this.authorizationRequired("drive", "Google Drive not connected.")];
+    }
+
+    let data;
+    try {
+      data = JSON.parse(stored);
+    } catch {
+      return [null, { content: [{ type: "text", text: "Failed to load stored integrations." }] }];
+    }
+
+    const drive = data.providers?.drive;
+    if (!drive?.accessToken) {
+      return [null, this.authorizationRequired("drive", "Google Drive not connected.")];
+    }
+
+    const oauth = new OAuth2Client();
+    oauth.setCredentials({
+      access_token: drive.accessToken,
+      refresh_token: drive.refreshToken,
+    });
+
+    return [createDriveContext(oauth), null];
+  }
+
+  private async getNotionContext(): Promise<[any, null] | [null, any]> {
+    const githubLogin = this.props?.login;
+    if (!githubLogin) {
+      return [null, this.authorizationRequired("notion", "No GitHub user found.")];
+    }
+
+    const key = `user-providers::${githubLogin}`;
+    const stored = await this.env.PROVIDERS_KV.get(key);
+    if (!stored) {
+      return [null, this.authorizationRequired("notion", "Notion not connected.")];
+    }
+
+    let data;
+    try {
+      data = JSON.parse(stored);
+    } catch {
+      return [null, { content: [{ type: "text", text: "Failed to load stored integrations." }] }];
+    }
+
+    const notion = data.providers?.notion;
+    if (!notion?.accessToken) {
+      return [null, this.authorizationRequired("notion", "Notion not connected.")];
+    }
+
+    return [createNotionContext(notion.accessToken), null];
+  }
+
+  private async getSlackContext(): Promise<[any, null] | [null, any]> {
+    const githubLogin = this.props?.login;
+    if (!githubLogin) {
+      return [null, this.authorizationRequired("slack", "No GitHub user found.")];
+    }
+
+    const key = `user-providers::${githubLogin}`;
+    const stored = await this.env.PROVIDERS_KV.get(key);
+    if (!stored) {
+      return [null, this.authorizationRequired("slack", "Slack not connected.")];
+    }
+
+    let data;
+    try {
+      data = JSON.parse(stored);
+    } catch {
+      return [null, { content: [{ type: "text", text: "Failed to load stored integrations." }] }];
+    }
+
+    const slack = data.providers?.slack;
+    if (!slack?.accessToken) {
+      return [null, this.authorizationRequired("slack", "Slack not connected.")];
+    }
+
+    return [createSlackContext(slack.accessToken), null];
   }
 }
 

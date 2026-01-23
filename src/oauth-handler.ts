@@ -27,6 +27,7 @@ interface NotionTokenResponse {
   owner?: {
     type: string;
     name?: any;
+    person?: { email: string };
   };
 }
 
@@ -37,11 +38,9 @@ async function handleDirectProviderAuth(c: any, provider: string) {
   const authHeader = c.req.header("Authorization");
   const currentToken = authHeader?.replace("Bearer ", "");
 
-  // Try to decode the current token to get existing props
   let existingProps: Props | null = null;
   if (currentToken) {
     try {
-      // The token should contain the encrypted props
       const decoded = await c.env.OAUTH_PROVIDER.verifyToken(currentToken);
       existingProps = decoded.props as Props;
     } catch (err) {
@@ -49,13 +48,12 @@ async function handleDirectProviderAuth(c: any, provider: string) {
     }
   }
 
-  // For direct auth, create state with existing user data
   const stateData = {
-    oauthReqInfo: {} as AuthRequest, // dummy for direct flow
+    oauthReqInfo: {} as AuthRequest,
     requestedProvider: provider,
     isDirect: true,
     currentToken,
-    existingProps, // ← Store existing props to merge later
+    existingProps,
   };
 
   const { stateToken } = await createOAuthState(stateData, c.env.OAUTH_KV);
@@ -70,19 +68,16 @@ async function handleDirectProviderAuth(c: any, provider: string) {
 app.get("/authorize", async (c) => {
   const requestedProvider = c.req.query("provider");
 
-  // Direct provider authorization (from tool response link)
   if (requestedProvider && !c.req.query("client_id")) {
     return handleDirectProviderAuth(c, requestedProvider);
   }
 
-  // Standard MCP OAuth flow
   const oauthReqInfo = await c.env.OAUTH_PROVIDER.parseAuthRequest(c.req.raw);
   const { clientId } = oauthReqInfo;
   if (!clientId) {
     return c.text("Invalid request", 400);
   }
 
-  // If client already approved → skip consent screen
   if (await isClientApproved(c.req.raw, clientId, env.COOKIE_ENCRYPTION_KEY)) {
     const stateData = {
       oauthReqInfo,
@@ -96,10 +91,8 @@ app.get("/authorize", async (c) => {
     });
   }
 
-  // Show consent screen with CSRF protection
   const { token: csrfToken, setCookie } = generateCSRFProtection();
 
-  // Determine which integrations are being requested
   const integrations = [];
   const requestedScopes = oauthReqInfo.scope || [];
 
@@ -281,21 +274,19 @@ async function redirectToProvider(request: Request, stateToken: string, provider
  * Unified OAuth Callback Handler for all providers
  */
 app.get("/callback/:provider", async (c) => {
-  const provider = c.req.param("provider");
+  const provider = c.req.param("provider") as "github" | "gmail" | "calendar" | "drive" | "notion" | "slack";
 
-  // Supported providers
-  const supported = ["github", "gmail", "calendar", "drive", "notion", "slack"];
+  const supported = ["github", "gmail", "calendar", "drive", "notion", "slack"] as const;
   if (!supported.includes(provider)) {
     return c.text(`Unsupported provider: ${provider}`, 400);
   }
 
-  // Validate state (secure, one-time use, session-bound)
   let stateData: any;
   let clearSessionCookie: string;
 
   try {
     const result = await validateOAuthState(c.req.raw, c.env.OAUTH_KV);
-    stateData = result.data; // now contains oauthReqInfo, requestedProvider, isDirect, etc.
+    stateData = result.data;
     clearSessionCookie = result.clearCookie;
   } catch (error: any) {
     if (error instanceof OAuthError) return error.toResponse();
@@ -303,13 +294,52 @@ app.get("/callback/:provider", async (c) => {
   }
 
   const callbackUrl = new URL(`/callback/${provider}`, c.req.url).href;
+  const existingProps = stateData.existingProps as Props | undefined;
 
-  // Exchange code for tokens
+  // Start with existing providers
+  const mergedProviders: Record<string, { accessToken: string; refreshToken?: string }> = {
+    ...(existingProps
+      ? {
+          github: existingProps.accessToken ? { accessToken: existingProps.accessToken } : undefined,
+          gmail: existingProps.gmailAccessToken
+            ? { accessToken: existingProps.gmailAccessToken, refreshToken: existingProps.gmailRefreshToken }
+            : undefined,
+          calendar: existingProps.calendarAccessToken
+            ? { accessToken: existingProps.calendarAccessToken, refreshToken: existingProps.calendarRefreshToken }
+            : undefined,
+          drive: existingProps.driveAccessToken
+            ? { accessToken: existingProps.driveAccessToken, refreshToken: existingProps.driveRefreshToken }
+            : undefined,
+          notion: existingProps.notionAccessToken
+            ? { accessToken: existingProps.notionAccessToken, refreshToken: existingProps.notionRefreshToken }
+            : undefined,
+          slack: existingProps.slackAccessToken
+            ? { accessToken: existingProps.slackAccessToken, refreshToken: existingProps.slackRefreshToken }
+            : undefined,
+        }
+      : {}),
+  };
+
+  let userData = existingProps
+    ? {
+        login: existingProps.login,
+        name: existingProps.name,
+        email: existingProps.email || "",
+      }
+    : {
+        login: "unknown-user",
+        name: "Unknown User",
+        email: "",
+      };
+
   let accessToken: string;
   let refreshToken: string | undefined;
 
+  // ───────────────────────────────────────────────────────────────
+  // Provider-specific logic
+  // ───────────────────────────────────────────────────────────────
   if (provider === "github") {
-    const [token, err] = await fetchUpstreamAuthToken({
+    const [tokenResult, err] = await fetchUpstreamAuthToken({
       client_id: c.env.GITHUB_CLIENT_ID,
       client_secret: c.env.GITHUB_CLIENT_SECRET,
       code: c.req.query("code"),
@@ -318,54 +348,22 @@ app.get("/callback/:provider", async (c) => {
     });
     if (err) return err;
 
-    accessToken = token;
+    accessToken = typeof tokenResult === "string" ? tokenResult : tokenResult.access_token;
 
-    // Fetch GitHub user info
-    const user = await new Octokit({ auth: accessToken }).rest.users.getAuthenticated();
-    const { login, name, email } = user.data;
+    const octokit = new Octokit({ auth: accessToken });
+    const { data: ghUser } = await octokit.rest.users.getAuthenticated();
 
-    // Merge with existing props if this is adding to an existing connection
-    const existingProps = stateData.existingProps as Props | undefined;
-    const mergedProviders = {
-      ...(existingProps
-        ? {
-            gmail: existingProps.gmailAccessToken
-              ? { accessToken: existingProps.gmailAccessToken, refreshToken: existingProps.gmailRefreshToken }
-              : undefined,
-            calendar: existingProps.calendarAccessToken
-              ? { accessToken: existingProps.calendarAccessToken, refreshToken: existingProps.calendarRefreshToken }
-              : undefined,
-            drive: existingProps.driveAccessToken
-              ? { accessToken: existingProps.driveAccessToken, refreshToken: existingProps.driveRefreshToken }
-              : undefined,
-            notion: existingProps.notionAccessToken ? { accessToken: existingProps.notionAccessToken } : undefined,
-            slack: existingProps.slackAccessToken
-              ? { accessToken: existingProps.slackAccessToken, refreshToken: existingProps.slackRefreshToken }
-              : undefined,
-          }
-        : {}),
-      github: { accessToken },
+    userData = {
+      login: ghUser.login,
+      name: ghUser.name || ghUser.login,
+      email: ghUser.email || userData.email,
     };
 
-    // Filter out undefined providers
-    const cleanedProviders = Object.fromEntries(Object.entries(mergedProviders).filter(([_, v]) => v !== undefined));
-
-    const mergedIntegrations = Array.from(new Set([...(existingProps?.connectedIntegrations || []), "github"]));
-
-    return completeAuthorization(c, {
-      ...stateData,
-      providers: cleanedProviders,
-      userData: { login, name: name || login, email: email || "" },
-      connectedIntegrations: mergedIntegrations,
-      clearSessionCookie,
-    });
+    mergedProviders.github = { accessToken };
   } else if (provider === "slack") {
-    // Slack OAuth
     const tokenResponse = await fetch("https://slack.com/api/oauth.v2.access", {
       method: "POST",
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
-      },
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({
         client_id: c.env.SLACK_CLIENT_ID,
         client_secret: c.env.SLACK_CLIENT_SECRET,
@@ -375,74 +373,21 @@ app.get("/callback/:provider", async (c) => {
     });
 
     if (!tokenResponse.ok) {
-      const errorText = await tokenResponse.text();
-      console.error("Slack token error:", errorText);
-      return new Response(`Failed to fetch Slack token: ${errorText}`, { status: 500 });
+      return c.text(`Slack token endpoint failed: ${await tokenResponse.text()}`, 500);
     }
 
-    const tokenData = (await tokenResponse.json()) as {
-      ok: boolean;
-      access_token?: string;
-      team?: { id: string; name: string };
-      authed_user?: { id: string };
-      error?: string;
-    };
-
+    const tokenData = (await tokenResponse.json()) as any;
     if (!tokenData.ok || !tokenData.access_token) {
-      console.error("Slack OAuth error:", tokenData.error);
-      return new Response(`Slack OAuth error: ${tokenData.error}`, { status: 500 });
+      return c.text(`Slack OAuth error: ${tokenData.error || "Unknown error"}`, 500);
     }
 
     accessToken = tokenData.access_token;
+    mergedProviders.slack = { accessToken };
 
-    // Build user data - prefer existing props
-    const existingProps = stateData.existingProps as Props | undefined;
-    let userData = existingProps
-      ? {
-          login: existingProps.login,
-          name: existingProps.name,
-          email: existingProps.email,
-        }
-      : {
-          login: tokenData.authed_user?.id || "slack-user",
-          name: tokenData.team?.name || "Slack User",
-          email: "",
-        };
-
-    // Merge providers
-    const mergedProviders = {
-      ...(existingProps
-        ? {
-            github: existingProps.accessToken ? { accessToken: existingProps.accessToken } : undefined,
-            gmail: existingProps.gmailAccessToken
-              ? { accessToken: existingProps.gmailAccessToken, refreshToken: existingProps.gmailRefreshToken }
-              : undefined,
-            calendar: existingProps.calendarAccessToken
-              ? { accessToken: existingProps.calendarAccessToken, refreshToken: existingProps.calendarRefreshToken }
-              : undefined,
-            drive: existingProps.driveAccessToken
-              ? { accessToken: existingProps.driveAccessToken, refreshToken: existingProps.driveRefreshToken }
-              : undefined,
-            notion: existingProps.notionAccessToken ? { accessToken: existingProps.notionAccessToken } : undefined,
-          }
-        : {}),
-      slack: { accessToken },
-    };
-
-    // Filter out undefined providers
-    const cleanedProviders = Object.fromEntries(Object.entries(mergedProviders).filter(([_, v]) => v !== undefined));
-
-    const mergedIntegrations = Array.from(new Set([...(existingProps?.connectedIntegrations || []), "slack"]));
-
-    return completeAuthorization(c, {
-      ...stateData,
-      providers: cleanedProviders,
-      userData,
-      connectedIntegrations: mergedIntegrations,
-      clearSessionCookie,
-    });
+    if (!userData.name || userData.name === "Unknown User") {
+      userData.name = tokenData.team?.name || "Slack User";
+    }
   } else if (provider === "notion") {
-    // Notion OAuth - different flow
     const tokenResponse = await fetch("https://api.notion.com/v1/oauth/token", {
       method: "POST",
       headers: {
@@ -457,103 +402,25 @@ app.get("/callback/:provider", async (c) => {
     });
 
     if (!tokenResponse.ok) {
-      const errorText = await tokenResponse.text();
-      console.error("Notion token error:", errorText);
-      return new Response(`Failed to fetch Notion token: ${errorText}`, { status: 500 });
+      return c.text(`Notion token endpoint failed: ${await tokenResponse.text()}`, 500);
     }
 
     const tokenData = (await tokenResponse.json()) as NotionTokenResponse;
-    accessToken = tokenData.access_token;
 
-    // Try to get user info from Notion response
-    const notionUser = tokenData.owner?.name;
-    const workspaceName = tokenData.workspace_name || "Notion Workspace";
-
-    // Build user data - prefer existing props, fallback to Notion data
-    const existingProps = stateData.existingProps as Props | undefined;
-    let userData = existingProps
-      ? {
-          login: existingProps.login,
-          name: existingProps.name,
-          email: existingProps.email,
-        }
-      : {
-          login: notionUser?.id || "notion-user",
-          name: notionUser?.name || workspaceName,
-          email: notionUser?.person?.email || "",
-        };
-
-    // Merge providers
-    const mergedProviders = {
-      ...(existingProps
-        ? {
-            github: existingProps.accessToken ? { accessToken: existingProps.accessToken } : undefined,
-            gmail: existingProps.gmailAccessToken
-              ? { accessToken: existingProps.gmailAccessToken, refreshToken: existingProps.gmailRefreshToken }
-              : undefined,
-            calendar: existingProps.calendarAccessToken
-              ? { accessToken: existingProps.calendarAccessToken, refreshToken: existingProps.calendarRefreshToken }
-              : undefined,
-            drive: existingProps.driveAccessToken
-              ? { accessToken: existingProps.driveAccessToken, refreshToken: existingProps.driveRefreshToken }
-              : undefined,
-            slack: existingProps.slackAccessToken
-              ? { accessToken: existingProps.slackAccessToken, refreshToken: existingProps.slackRefreshToken }
-              : undefined,
-          }
-        : {}),
-      notion: { accessToken },
-    };
-
-    // Filter out undefined providers
-    const cleanedProviders = Object.fromEntries(Object.entries(mergedProviders).filter(([_, v]) => v !== undefined));
-
-    const mergedIntegrations = Array.from(new Set([...(existingProps?.connectedIntegrations || []), "notion"]));
-
-    return completeAuthorization(c, {
-      ...stateData,
-      providers: cleanedProviders,
-      userData,
-      connectedIntegrations: mergedIntegrations,
-      clearSessionCookie,
-    });
-  } else if (provider === "notion") {
-    // Notion OAuth - different flow
-    const tokenResponse = await fetch("https://api.notion.com/v1/oauth/token", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Basic ${btoa(`${c.env.NOTION_CLIENT_ID}:${c.env.NOTION_CLIENT_SECRET}`)}`,
-      },
-      body: JSON.stringify({
-        grant_type: "authorization_code",
-        code: c.req.query("code"),
-        redirect_uri: callbackUrl,
-      }),
-    });
-
-    if (!tokenResponse.ok) {
-      const errorText = await tokenResponse.text();
-      console.error("Notion token error:", errorText);
-      return new Response(`Failed to fetch Notion token: ${errorText}`, { status: 500 });
-    }
-
-    const tokenData = (await tokenResponse.json()) as NotionTokenResponse;
     accessToken = tokenData.access_token;
     refreshToken = tokenData.refresh_token;
 
-    return completeAuthorization(c, {
-      ...stateData,
-      providers: {
-        ...(stateData.providers || {}),
-        notion: { accessToken, refreshToken },
-      },
-      connectedIntegrations: [...(stateData.connectedIntegrations || []), "notion"],
-      clearSessionCookie,
-    });
+    mergedProviders.notion = { accessToken, refreshToken };
+
+    // if (tokenData.owner?.type === "person" && tokenData.owner.person?.email) {
+    //   userData.email = tokenData.owner.person.email;
+    // }
+    // if (!userData.name || userData.name === "Unknown User") {
+    //   userData.name = tokenData.workspace_name || "Notion User";
+    // }
   } else {
-    // Google providers (gmail, calendar, drive)
-    const [tokenResponse, errResponse] = await fetchUpstreamAuthToken({
+    // Google providers
+    const [tokenData, errResponse] = await fetchUpstreamAuthToken({
       client_id: c.env.GOOGLE_CLIENT_ID,
       client_secret: c.env.GOOGLE_CLIENT_SECRET,
       code: c.req.query("code"),
@@ -563,104 +430,57 @@ app.get("/callback/:provider", async (c) => {
 
     if (errResponse) return errResponse;
 
-    if (typeof tokenResponse === "string" && tokenResponse.startsWith("{")) {
-      const tokenData = JSON.parse(tokenResponse);
-      accessToken = tokenData.access_token;
-      refreshToken = tokenData.refresh_token;
-    } else {
-      accessToken = tokenResponse;
-    }
+    accessToken = tokenData.access_token;
+    refreshToken = tokenData.refresh_token;
 
-    // Try to get Google user info
-    const existingProps = stateData.existingProps as Props | undefined;
-    let userData = existingProps
-      ? {
-          login: existingProps.login,
-          name: existingProps.name,
-          email: existingProps.email,
-        }
-      : undefined;
+    mergedProviders[provider] = { accessToken, refreshToken };
 
-    if (!userData) {
-      try {
-        const userInfoResponse = await fetch("https://www.googleapis.com/oauth2/v2/userinfo", {
-          headers: { Authorization: `Bearer ${accessToken}` },
-        });
-
-        if (userInfoResponse.ok) {
-          const userInfo = (await userInfoResponse.json()) as {
-            email?: string;
-            name?: string;
-            id?: string;
-          };
-
-          userData = {
-            login: userInfo.email?.split("@")[0] || userInfo.id || "google-user",
-            name: userInfo.name || userInfo.email || "Google User",
-            email: userInfo.email || "",
-          };
-        }
-      } catch (err) {
-        console.error("Failed to fetch Google user info:", err);
-      }
-    }
-
-    // Fallback if we still don't have user data
-    if (!userData) {
-      userData = {
-        login: "google-user",
-        name: "Google User",
-        email: "",
-      };
-    }
-
-    // Merge providers
-    const mergedProviders = {
-      ...(existingProps
-        ? {
-            github: existingProps.accessToken ? { accessToken: existingProps.accessToken } : undefined,
-            gmail:
-              provider === "gmail" || existingProps.gmailAccessToken
-                ? undefined
-                : existingProps.gmailAccessToken
-                  ? { accessToken: existingProps.gmailAccessToken, refreshToken: existingProps.gmailRefreshToken }
-                  : undefined,
-            calendar:
-              provider === "calendar" || existingProps.calendarAccessToken
-                ? undefined
-                : existingProps.calendarAccessToken
-                  ? { accessToken: existingProps.calendarAccessToken, refreshToken: existingProps.calendarRefreshToken }
-                  : undefined,
-            drive:
-              provider === "drive" || existingProps.driveAccessToken
-                ? undefined
-                : existingProps.driveAccessToken
-                  ? { accessToken: existingProps.driveAccessToken, refreshToken: existingProps.driveRefreshToken }
-                  : undefined,
-            notion: existingProps.notionAccessToken
-              ? { accessToken: existingProps.notionAccessToken, refreshToken: existingProps.notionRefreshToken }
-              : undefined,
-            slack: existingProps.slackAccessToken
-              ? { accessToken: existingProps.slackAccessToken, refreshToken: existingProps.slackRefreshToken }
-              : undefined,
-          }
-        : {}),
-      [provider]: { accessToken, refreshToken },
-    };
-
-    // Filter out undefined providers
-    const cleanedProviders = Object.fromEntries(Object.entries(mergedProviders).filter(([_, v]) => v !== undefined));
-
-    const mergedIntegrations = Array.from(new Set([...(existingProps?.connectedIntegrations || []), provider]));
-
-    return completeAuthorization(c, {
-      ...stateData,
-      providers: cleanedProviders,
-      userData,
-      connectedIntegrations: mergedIntegrations,
-      clearSessionCookie,
-    });
+    // Optional: fetch userinfo (uncomment if needed)
+    // try {
+    //   const res = await fetch("https://www.googleapis.com/oauth2/v2/userinfo", {
+    //     headers: { Authorization: `Bearer ${accessToken}` },
+    //   });
+    //   if (res.ok) {
+    //     const info = await res.json() as any;
+    //     if (info.email) userData.email = info.email;
+    //     if (info.name && (!userData.name || userData.name === "Unknown User")) userData.name = info.name;
+    //   }
+    // } catch (e) {
+    //   console.error("Google userinfo fetch failed:", e);
+    // }
   }
+
+  // ───────────────────────────────────────────────────────────────
+  // Save merged providers to persistent KV (new namespace)
+  // ───────────────────────────────────────────────────────────────
+  if (userData.login && userData.login !== "unknown-user") {
+    const key = `user-providers::${userData.login}`;
+    await c.env.PROVIDERS_KV.put(
+      key,
+      JSON.stringify({
+        providers: mergedProviders,
+        connectedIntegrations: Array.from(new Set([...(existingProps?.connectedIntegrations || []), provider])),
+        userData,
+        updatedAt: new Date().toISOString(),
+      }),
+      { expirationTtl: 7776000 },
+    ); // 90 days
+  }
+
+  // ───────────────────────────────────────────────────────────────
+  // Finalize
+  // ───────────────────────────────────────────────────────────────
+  const cleanedProviders = Object.fromEntries(Object.entries(mergedProviders).filter(([, v]) => v !== undefined));
+
+  const mergedIntegrations = Array.from(new Set([...(existingProps?.connectedIntegrations || []), provider]));
+
+  return completeAuthorization(c, {
+    ...stateData,
+    providers: cleanedProviders,
+    userData,
+    connectedIntegrations: mergedIntegrations,
+    clearSessionCookie,
+  });
 });
 
 /**
@@ -686,53 +506,63 @@ async function completeAuthorization(
     isDirect = false,
   } = params;
 
+  // ───────────────────────────────────────────────────────────────
+  // Load persisted providers if this is a standard GitHub flow
+  // ───────────────────────────────────────────────────────────────
+  if (!isDirect && providers.github?.accessToken && userData.login) {
+    const saved = await c.env.PROVIDERS_KV.get(`user-providers::${userData.login}`);
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        // Merge saved providers (GitHub overwrites if refreshed)
+        Object.assign(providers, parsed.providers || {});
+        // Merge integrations
+        const savedIntegrations = parsed.connectedIntegrations || [];
+        connectedIntegrations.push(...savedIntegrations);
+        // Deduplicate
+        const uniqueIntegrations = Array.from(new Set(connectedIntegrations));
+        connectedIntegrations.length = 0;
+        connectedIntegrations.push(...uniqueIntegrations);
+
+        // Optionally update email/name if missing
+        if (!userData.email && parsed.userData?.email) {
+          userData.email = parsed.userData.email;
+        }
+      } catch (e) {
+        console.error("Failed to load persisted providers:", e);
+      }
+    }
+  }
+
   const accessToken = providers.github?.accessToken || "";
 
-  // For direct auth flows (adding Gmail/Calendar/Notion to existing connection)
-  // we need to handle the case where there's no full OAuth flow
   if (isDirect && !oauthReqInfo.redirectUri) {
-    // Show success page or redirect back to a success URL
     const html = `
       <!DOCTYPE html>
       <html>
         <head>
           <title>Authorization Successful</title>
           <style>
-            body {
-              font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-              display: flex;
-              align-items: center;
-              justify-content: center;
-              min-height: 100vh;
-              margin: 0;
-              background: #f9fafb;
-            }
-            .card {
-              background: white;
-              padding: 3rem;
-              border-radius: 8px;
-              box-shadow: 0 8px 36px 8px rgba(0, 0, 0, 0.1);
-              text-align: center;
-              max-width: 500px;
-            }
+            body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; background: #f9fafb; }
+            .card { background: white; padding: 3rem; border-radius: 8px; box-shadow: 0 8px 36px 8px rgba(0,0,0,0.1); text-align: center; max-width: 500px; }
             h1 { color: #10b981; margin: 0 0 1rem 0; }
             p { color: #555; line-height: 1.6; }
+            strong { color: #111; }
           </style>
         </head>
         <body>
           <div class="card">
             <h1>✓ Authorization Successful</h1>
             <p>You have successfully connected <strong>${connectedIntegrations.join(", ")}</strong>.</p>
-            <p>You can now close this window and retry your original request in your MCP client.</p>
+            <p><strong>Important:</strong> To use this integration, please <strong>re-authorize your MCP client</strong> (refresh your connection in the MCP app). This will update your session with all connected services.</p>
+            <p>You can now close this window.</p>
           </div>
         </body>
       </html>
     `;
 
     const headers = new Headers({ "Content-Type": "text/html" });
-    if (clearSessionCookie) {
-      headers.set("Set-Cookie", clearSessionCookie);
-    }
+    if (clearSessionCookie) headers.set("Set-Cookie", clearSessionCookie);
 
     return new Response(html, { status: 200, headers });
   }
@@ -768,10 +598,7 @@ async function completeAuthorization(
     headers.set("Set-Cookie", clearSessionCookie);
   }
 
-  return new Response(null, {
-    status: 302,
-    headers,
-  });
+  return new Response(null, { status: 302, headers });
 }
 
 export { app as OAuthHandler };

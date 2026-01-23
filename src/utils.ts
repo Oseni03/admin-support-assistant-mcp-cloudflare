@@ -61,7 +61,7 @@ export async function fetchUpstreamAuthToken({
   client_secret: string;
   redirect_uri: string;
   client_id: string;
-}): Promise<[string, null] | [null, Response]> {
+}): Promise<[any, null] | [null, Response]> {
   if (!code) {
     return [null, new Response("Missing code", { status: 400 })];
   }
@@ -91,20 +91,29 @@ export async function fetchUpstreamAuthToken({
 
   if (!resp.ok) {
     const errorText = await resp.text();
-    console.error("Google token endpoint error:", {
+    console.error("Token endpoint error:", {
       status: resp.status,
       body: errorText,
     });
     return [null, new Response(`Failed to fetch access token: ${errorText}`, { status: 500 })];
   }
 
-  const body = await resp.formData();
-  const accessToken = body.get("access_token") as string;
-  if (!accessToken) {
-    return [null, new Response("Missing access token", { status: 400 })];
-  }
+  // GitHub returns form data, Google returns JSON
+  const contentType = resp.headers.get("content-type") || "";
 
-  return [accessToken, null];
+  if (contentType.includes("application/json")) {
+    // Google OAuth response
+    const data = await resp.json();
+    return [data, null];
+  } else {
+    // GitHub OAuth response (form data)
+    const body = await resp.formData();
+    const accessToken = body.get("access_token") as string;
+    if (!accessToken) {
+      return [null, new Response("Missing access token", { status: 400 })];
+    }
+    return [accessToken, null];
+  }
 }
 
 // Context from the auth process, encrypted & stored in the auth token

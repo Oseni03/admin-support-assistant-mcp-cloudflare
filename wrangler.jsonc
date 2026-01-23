@@ -39,6 +39,11 @@
     {
       "binding": "OAUTH_KV",
       "id": "5967f7d2daf641b68dc9fee8cf957679"
+    },
+    {
+      "binding": "PROVIDERS_KV",
+      "id": "66577345c2ee4fe385a958f35b1af053",
+      "remote": true
     }
   ],
   "ai": {
