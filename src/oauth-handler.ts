@@ -659,24 +659,23 @@ async function completeAuthorization(
 
   if (isDirect && !oauthReqInfo.redirectUri) {
     const html = `
-      <!DOCTYPE html>
+            <!DOCTYPE html>
       <html>
         <head>
           <title>Authorization Successful</title>
           <style>
-            body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; background: #f9fafb; }
-            .card { background: white; padding: 3rem; border-radius: 8px; box-shadow: 0 8px 36px 8px rgba(0,0,0,0.1); text-align: center; max-width: 500px; }
-            h1 { color: #10b981; margin: 0 0 1rem 0; }
-            p { color: #555; line-height: 1.6; }
-            strong { color: #111; }
+            body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; background: #fff; color: #000; }
+            .card { background: #fff; padding: 2rem; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); text-align: center; max-width: 500px; }
+            h1 { color: #000; margin: 0 0 1rem 0; }
+            p { line-height: 1.5; margin-bottom: 1rem; }
+            strong { font-weight: bold; }
           </style>
         </head>
         <body>
           <div class="card">
             <h1>✓ Authorization Successful</h1>
             <p>You have successfully connected <strong>${connectedIntegrations.join(", ")}</strong>.</p>
-            <p><strong>Important:</strong> To use this integration, please <strong>re-authorize your MCP client</strong> (refresh your connection in the MCP app). This will update your session with all connected services.</p>
-            <p>You can now close this window.</p>
+            <p>You can now return to the application to continue.</p>
           </div>
         </body>
       </html>

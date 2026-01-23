@@ -445,291 +445,273 @@ export function renderApprovalDialog(request: Request, options: ApprovalDialogOp
   const htmlContent = `
     <!DOCTYPE html>
     <html lang="en">
-      <head>
+    <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>${clientName} | Authorization Request</title>
+        <title>Authorization Request</title>
         <style>
-          :root {
-            --primary-color: #0070f3;
-            --error-color: #f44336;
-            --border-color: #e5e7eb;
-            --text-color: #333;
-            --background-color: #fff;
-            --card-shadow: 0 8px 36px 8px rgba(0, 0, 0, 0.1);
-          }
+        :root {
+            --bg: #ffffff;
+            --text: #000000;
+            --gray: #333333;
+            --light-gray: #666666;
+            --border: #e0e0e0;
+            --primary: #000000;
+            --primary-hover: #222222;
+        }
 
-          body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
-                         Helvetica, Arial, sans-serif, "Apple Color Emoji",
-                         "Segoe UI Emoji", "Segoe UI Symbol";
-            line-height: 1.6;
-            color: var(--text-color);
-            background-color: #f9fafb;
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            line-height: 1.5;
+            color: var(--text);
+            background-color: var(--bg);
             margin: 0;
             padding: 0;
-          }
+        }
 
-          .container {
-            max-width: 600px;
-            margin: 2rem auto;
-            padding: 1rem;
-          }
+        .container {
+            max-width: 580px;
+            margin: 40px auto;
+            padding: 0 20px;
+        }
 
-          .precard {
-            padding: 2rem;
+        .card {
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 32px;
+            box-shadow: 0 4px 16px rgba(0, 0, 0, 0.08);
+        }
+
+        .header {
             text-align: center;
-          }
+            margin-bottom: 28px;
+        }
 
-          .card {
-            background-color: var(--background-color);
-            border-radius: 8px;
-            box-shadow: var(--card-shadow);
-            padding: 2rem;
-          }
-
-          .header {
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            margin-bottom: 1.5rem;
-          }
-
-          .logo {
-            width: 48px;
-            height: 48px;
-            margin-right: 1rem;
-            border-radius: 8px;
-            object-fit: contain;
-          }
-
-          .title {
-            margin: 0;
-            font-size: 1.3rem;
-            font-weight: 400;
-          }
-
-          .alert {
-            margin: 0;
-            font-size: 1.5rem;
-            font-weight: 400;
-            margin: 1rem 0;
-            text-align: center;
-          }
-
-          .description {
-            color: #555;
-          }
-
-          .client-info {
-            border: 1px solid var(--border-color);
-            border-radius: 6px;
-            padding: 1rem 1rem 0.5rem;
-            margin-bottom: 1.5rem;
-          }
-
-          .client-name {
+        .title {
+            font-size: 1.6rem;
             font-weight: 600;
-            font-size: 1.2rem;
-            margin: 0 0 0.5rem 0;
-          }
+            margin: 0;
+            color: var(--text);
+        }
 
-          .client-detail {
+        .subtitle {
+            margin-top: 8px;
+            color: var(--light-gray);
+            font-size: 1rem;
+        }
+
+        .alert {
+            font-size: 1.4rem;
+            font-weight: 600;
+            margin: 0 0 24px;
+            text-align: center;
+        }
+
+        .client-info {
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 24px;
+            background: #fafafa;
+        }
+
+        .client-detail {
             display: flex;
-            margin-bottom: 0.5rem;
-            align-items: baseline;
-          }
+            margin-bottom: 12px;
+            font-size: 0.95rem;
+        }
 
-          .detail-label {
+        .detail-label {
             font-weight: 500;
-            min-width: 120px;
-          }
+            min-width: 110px;
+            color: var(--gray);
+        }
 
-          .detail-value {
-            font-family: SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+        .detail-value {
+            flex: 1;
             word-break: break-all;
-          }
+            color: var(--text);
+        }
 
-          .detail-value a {
-            color: inherit;
+        .detail-value a {
+            color: var(--primary);
+            text-decoration: none;
+        }
+
+        .detail-value a:hover {
             text-decoration: underline;
-          }
+        }
 
-          .detail-value.small {
-            font-size: 0.8em;
-          }
+        .info-text {
+            color: var(--gray);
+            margin: 20px 0;
+            font-size: 0.95rem;
+            text-align: center;
+        }
 
-          .external-link-icon {
-            font-size: 0.75em;
-            margin-left: 0.25rem;
-            vertical-align: super;
-          }
-
-          .actions {
+        .actions {
             display: flex;
             justify-content: flex-end;
-            gap: 1rem;
-            margin-top: 2rem;
-          }
+            gap: 12px;
+            margin-top: 28px;
+        }
 
-          .button {
-            padding: 0.75rem 1.5rem;
+        .button {
+            padding: 10px 24px;
             border-radius: 6px;
+            font-size: 1rem;
             font-weight: 500;
             cursor: pointer;
             border: none;
-            font-size: 1rem;
-          }
+            transition: all 0.2s;
+        }
 
-          .button-primary {
-            background-color: var(--primary-color);
+        .button-primary {
+            background-color: var(--primary);
             color: white;
-          }
+        }
 
-          .button-secondary {
-            background-color: transparent;
-            border: 1px solid var(--border-color);
-            color: var(--text-color);
-          }
+        .button-primary:hover {
+            background-color: var(--primary-hover);
+        }
 
-          @media (max-width: 640px) {
-            .container {
-              margin: 1rem auto;
-              padding: 0.5rem;
-            }
+        .button-secondary {
+            background: transparent;
+            border: 1px solid var(--border);
+            color: var(--text);
+        }
 
+        .button-secondary:hover {
+            background: #f5f5f5;
+        }
+
+        @media (max-width: 640px) {
             .card {
-              padding: 1.5rem;
+            padding: 24px;
             }
 
             .client-detail {
-              flex-direction: column;
+            flex-direction: column;
+            gap: 4px;
             }
 
             .detail-label {
-              min-width: unset;
-              margin-bottom: 0.25rem;
+            min-width: unset;
             }
 
             .actions {
-              flex-direction: column;
+            flex-direction: column;
+            gap: 12px;
             }
 
             .button {
-              width: 100%;
+            width: 100%;
             }
-          }
+        }
         </style>
-      </head>
-      <body>
+    </head>
+    <body>
         <div class="container">
-          <div class="precard">
+        <div class="card">
             <div class="header">
-              ${logoUrl ? `<img src="${logoUrl}" alt="${serverName} Logo" class="logo">` : ""}
-            <h1 class="title"><strong>${serverName}</strong></h1>
+            <h1 class="title">Authorization Request</h1>
+            ${serverDescription ? `<p class="subtitle">${serverDescription}</p>` : ""}
             </div>
 
-            ${serverDescription ? `<p class="description">${serverDescription}</p>` : ""}
-          </div>
-
-          <div class="card">
-
-            <h2 class="alert"><strong>${clientName || "A new MCP Client"}</strong> is requesting access</h1>
+            <h2 class="alert">
+            <strong>${clientName || "An application"}</strong> is requesting access
+            </h2>
 
             <div class="client-info">
-              <div class="client-detail">
+            <div class="client-detail">
                 <div class="detail-label">Name:</div>
-                <div class="detail-value">
-                  ${clientName}
-                </div>
-              </div>
-
-              ${
-                clientUri
-                  ? `
-                <div class="client-detail">
-                  <div class="detail-label">Website:</div>
-                  <div class="detail-value small">
-                    <a href="${clientUri}" target="_blank" rel="noopener noreferrer">
-                      ${clientUri}
-                    </a>
-                  </div>
-                </div>
-              `
-                  : ""
-              }
-
-              ${
-                policyUri
-                  ? `
-                <div class="client-detail">
-                  <div class="detail-label">Privacy Policy:</div>
-                  <div class="detail-value">
-                    <a href="${policyUri}" target="_blank" rel="noopener noreferrer">
-                      ${policyUri}
-                    </a>
-                  </div>
-                </div>
-              `
-                  : ""
-              }
-
-              ${
-                tosUri
-                  ? `
-                <div class="client-detail">
-                  <div class="detail-label">Terms of Service:</div>
-                  <div class="detail-value">
-                    <a href="${tosUri}" target="_blank" rel="noopener noreferrer">
-                      ${tosUri}
-                    </a>
-                  </div>
-                </div>
-              `
-                  : ""
-              }
-
-              ${
-                redirectUris.length > 0
-                  ? `
-                <div class="client-detail">
-                  <div class="detail-label">Redirect URIs:</div>
-                  <div class="detail-value small">
-                    ${redirectUris.map((uri) => `<div>${uri}</div>`).join("")}
-                  </div>
-                </div>
-              `
-                  : ""
-              }
-
-              ${
-                contacts
-                  ? `
-                <div class="client-detail">
-                  <div class="detail-label">Contact:</div>
-                  <div class="detail-value">${contacts}</div>
-                </div>
-              `
-                  : ""
-              }
+                <div class="detail-value">${clientName || "Unknown application"}</div>
             </div>
 
-            <p>This MCP Client is requesting to be authorized on ${serverName}. If you approve, you will be redirected to complete authentication.</p>
+            ${
+              clientUri
+                ? `
+                <div class="client-detail">
+                <div class="detail-label">Website:</div>
+                <div class="detail-value">
+                    <a href="${clientUri}" target="_blank" rel="noopener noreferrer">${clientUri}</a>
+                </div>
+                </div>
+            `
+                : ""
+            }
+
+            ${
+              policyUri
+                ? `
+                <div class="client-detail">
+                <div class="detail-label">Privacy Policy:</div>
+                <div class="detail-value">
+                    <a href="${policyUri}" target="_blank" rel="noopener noreferrer">${policyUri}</a>
+                </div>
+                </div>
+            `
+                : ""
+            }
+
+            ${
+              tosUri
+                ? `
+                <div class="client-detail">
+                <div class="detail-label">Terms of Service:</div>
+                <div class="detail-value">
+                    <a href="${tosUri}" target="_blank" rel="noopener noreferrer">${tosUri}</a>
+                </div>
+                </div>
+            `
+                : ""
+            }
+
+            ${
+              redirectUris.length > 0
+                ? `
+                <div class="client-detail">
+                <div class="detail-label">Redirect URIs:</div>
+                <div class="detail-value">
+                    ${redirectUris.map((uri) => `<div>${uri}</div>`).join("")}
+                </div>
+                </div>
+            `
+                : ""
+            }
+
+            ${
+              contacts
+                ? `
+                <div class="client-detail">
+                <div class="detail-label">Contact:</div>
+                <div class="detail-value">${contacts}</div>
+                </div>
+            `
+                : ""
+            }
+            </div>
+
+            <p class="info-text">
+            This application wants to be authorized on your account.
+            If you approve, you will be redirected to complete authentication.
+            </p>
 
             <form method="post" action="${new URL(request.url).pathname}">
-              <input type="hidden" name="state" value="${encodedState}">
-              <input type="hidden" name="csrf_token" value="${csrfToken}">
+            <input type="hidden" name="state" value="${encodedState}">
+            <input type="hidden" name="csrf_token" value="${csrfToken}">
 
-              <div class="actions">
+            <div class="actions">
                 <button type="button" class="button button-secondary" onclick="window.history.back()">Cancel</button>
                 <button type="submit" class="button button-primary">Approve</button>
-              </div>
+            </div>
             </form>
-          </div>
         </div>
-      </body>
+        </div>
+    </body>
     </html>
-  `;
+    `;
 
   return new Response(htmlContent, {
     headers: {
