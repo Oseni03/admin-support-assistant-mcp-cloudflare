@@ -10,13 +10,11 @@
     "type-check": "tsc --noEmit"
   },
   "dependencies": {
-    "@better-auth/cli": "^1.4.17",
     "@cloudflare/workers-oauth-provider": "^0.2.2",
     "@libsql/client": "^0.17.0",
     "@notionhq/client": "^5.7.0",
     "@slack/web-api": "^7.13.0",
     "agents": "^0.3.1",
-    "better-auth": "^1.4.17",
     "dotenv": "^17.2.3",
     "drizzle-orm": "^0.45.1",
     "google-auth-library": "^10.5.0",

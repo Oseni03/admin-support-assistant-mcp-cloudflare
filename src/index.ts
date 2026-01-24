@@ -15,7 +15,6 @@ import { createSlackContext } from "./tools/slack/context";
 import { createDriveContext } from "./tools/google-drive/context";
 import { driveTools } from "./tools/google-drive";
 import { Props } from "./utils";
-import { Auth, createAuth } from "./lib/auth";
 import { createDbClient, DbClient } from "./db/client";
 import { IntegrationService } from "./services/integrations";
 import { BillingService } from "./services/billing";
@@ -23,7 +22,6 @@ import { eq } from "drizzle-orm";
 import * as schema from "./db/schema";
 
 export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
-  private auth!: Auth;
   private db!: DbClient;
   private integrations!: IntegrationService;
   private billing!: BillingService;
@@ -35,7 +33,6 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
 
   async init() {
     // Initialize services
-    this.auth = createAuth(this.env);
     this.db = createDbClient(this.env.DB); // D1 database binding
     this.integrations = new IntegrationService(this.db);
     this.billing = new BillingService(this.db);
