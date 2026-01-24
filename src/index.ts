@@ -1,7 +1,6 @@
 import OAuthProvider from "@cloudflare/workers-oauth-provider";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { McpAgent } from "agents/mcp";
-import { Octokit } from "octokit";
 import { z } from "zod";
 import { OAuthHandler } from "./oauth-handler";
 import { OAuth2Client } from "google-auth-library";
@@ -17,18 +16,13 @@ import { createDriveContext } from "./tools/google-drive/context";
 import { driveTools } from "./tools/google-drive";
 import { Props } from "./utils";
 
-const ALLOWED_USERNAMES = new Set<string>([
-  // Add GitHub usernames allowed to use restricted tools
-]);
-
 export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
   server = new McpServer({
-    name: "Admin Assistant MCP with GitHub, Gmail, Calendar, Drive, Notion & Slack Integrations",
+    name: "Admin Assistant MCP with Google, Gmail, Calendar, Drive, Notion & Slack Integrations",
     version: "1.0.0",
   });
 
   async init() {
-    // ── List available integrations ─────────────────────────────────────────
     // Register the integrations resource
     this.server.registerResource(
       "integrations-list",
@@ -39,44 +33,44 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
         mimeType: "text/html",
       },
       async () => {
-        const githubLogin = this.props?.login || null;
+        const userEmail = this.props?.email || null;
 
         let integrations = {
-          github: {
+          google: {
             connected: !!this.props?.accessToken,
-            user: githubLogin,
-            description: "Access GitHub repositories and user information",
+            email: userEmail,
+            description: "Base Google authentication for user profile",
           },
           gmail: {
             connected: false,
-            email: this.props?.email || null,
+            email: userEmail,
             description: "Send, read, and manage Google emails",
           },
           calendar: {
             connected: false,
-            email: this.props?.email || null,
+            email: userEmail,
             description: "Manage Google Calendar events and calendars",
           },
           drive: {
             connected: false,
-            email: this.props?.email || null,
+            email: userEmail,
             description: "Read, write, and manage files in Google Drive",
           },
           notion: {
             connected: false,
-            user: githubLogin || null,
+            user: userEmail,
             description: "Access and manage Notion pages and databases",
           },
           slack: {
             connected: false,
-            user: githubLogin || null,
+            user: userEmail,
             description: "Send messages and manage Slack workspace",
           },
         };
 
-        // Load from KV for non-GitHub integrations
-        if (githubLogin) {
-          const key = `user-providers::${githubLogin}`;
+        // Load from KV for non-Google-base integrations
+        if (userEmail) {
+          const key = `user-providers::${userEmail}`;
           const stored = await this.env.PROVIDERS_KV.get(key);
           if (stored) {
             const data = JSON.parse(stored);
@@ -209,7 +203,7 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
       },
     );
 
-    // Register the tool that returns a ResourceLink
+    // Register the listIntegrations tool
     this.server.registerTool(
       "listIntegrations",
       {
@@ -236,45 +230,46 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
       },
     );
 
-    // ── Register GitHub tools ───────────────────────────────────────────────
-    await this.registerGitHubTools();
+    // Register Google base auth tool
+    await this.registerGoogleTools();
 
-    // ── Register Gmail tools (JIT auth preserved!) ──────────────────────────
+    // Register other tools
     await this.registerGmailTools();
-
-    // ── Register Calendar tools (same JIT pattern) ──────────────────────────
     await this.registerCalendarTools();
-
-    // ── Google Drive tools (JIT auth) ─────────────────────────────────────
     await this.registerDriveTools();
-
-    // ── Register Notion tools (NEW - same JIT pattern) ──────────────────────
     await this.registerNotionTools();
-
-    // ── Register Slack tools (NEW - same JIT pattern) ───────────────────────
     await this.registerSlackTools();
   }
 
-  // ── GitHub tools registration (unchanged) ───────────────────────────────
-  private async registerGitHubTools() {
+  // Google base auth
+  private async registerGoogleTools() {
     this.server.registerTool(
-      "userInfoOctokit",
+      "userInfoGoogle",
       {
-        title: "userInfoOctokit",
-        description: "Get authenticated user information from GitHub using Octokit",
+        title: "userInfoGoogle",
+        description: "Get authenticated user information from Google",
         inputSchema: z.object({}).strict(),
         annotations: { readOnlyHint: true, idempotentHint: true },
       },
       async () => {
         if (!this.props?.accessToken) {
-          return this.authorizationRequired("github", "GitHub integration is required", "userInfoOctokit");
+          return this.authorizationRequired("google", "Google integration is required", "userInfoGoogle");
         }
 
         try {
-          const octokit = new Octokit({ auth: this.props.accessToken });
-          const user = await octokit.rest.users.getAuthenticated();
+          const response = await fetch("https://www.googleapis.com/oauth2/v2/userinfo", {
+            headers: {
+              Authorization: `Bearer ${this.props.accessToken}`,
+            },
+          });
+
+          if (!response.ok) {
+            throw new Error(`Failed to fetch user info: ${response.statusText}`);
+          }
+
+          const user = await response.json();
           return {
-            content: [{ type: "text", text: JSON.stringify(user.data, null, 2) }],
+            content: [{ type: "text", text: JSON.stringify(user, null, 2) }],
           };
         } catch (error: any) {
           return {
@@ -415,9 +410,9 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
     const url = new URL("/authorize", baseUrl);
     url.searchParams.set("provider", provider);
 
-    // Include GitHub login in URL so it's available in browser-based auth
-    if (this.props?.login) {
-      url.searchParams.set("user", this.props.login);
+    // Include Google email in URL
+    if (this.props?.email) {
+      url.searchParams.set("user", this.props.email);
     }
 
     if (returnContext) {
@@ -455,13 +450,12 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
   // Fixed context getters that check KV FIRST, then fall back to props
 
   private async getGmailContext(): Promise<[any, null] | [null, any]> {
-    const githubLogin = this.props?.login;
-    if (!githubLogin) {
-      return [null, this.authorizationRequired("gmail", "No GitHub user found.")];
+    const userEmail = this.props?.email;
+    if (!userEmail) {
+      return [null, this.authorizationRequired("gmail", "No Google user found.")];
     }
 
-    // 1. Try to load from KV first (incremental auth)
-    const key = `user-providers::${githubLogin}`;
+    const key = `user-providers::${userEmail}`;
     let stored;
     try {
       stored = await this.env.PROVIDERS_KV.get(key);
@@ -480,7 +474,6 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
       }
     }
 
-    // 2. Fall back to props (initial auth)
     if (!gmail && this.props?.gmailAccessToken) {
       gmail = {
         accessToken: this.props.gmailAccessToken,
@@ -488,7 +481,6 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
       };
     }
 
-    // 3. If still no token, require auth
     if (!gmail?.accessToken) {
       return [null, this.authorizationRequired("gmail", "Gmail not connected. Please authorize Gmail integration.")];
     }
@@ -502,13 +494,14 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
     return [createGmailContext(oauth), null];
   }
 
+  // Similar updates for other context getters...
   private async getCalendarContext(): Promise<[any, null] | [null, any]> {
-    const githubLogin = this.props?.login;
-    if (!githubLogin) {
-      return [null, this.authorizationRequired("calendar", "No GitHub user found.")];
+    const userEmail = this.props?.email;
+    if (!userEmail) {
+      return [null, this.authorizationRequired("calendar", "No Google user found.")];
     }
 
-    const key = `user-providers::${githubLogin}`;
+    const key = `user-providers::${userEmail}`;
     let stored;
     try {
       stored = await this.env.PROVIDERS_KV.get(key);
@@ -548,12 +541,12 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
   }
 
   private async getDriveContext(): Promise<[any, null] | [null, any]> {
-    const githubLogin = this.props?.login;
-    if (!githubLogin) {
-      return [null, this.authorizationRequired("drive", "No GitHub user found.")];
+    const userEmail = this.props?.email;
+    if (!userEmail) {
+      return [null, this.authorizationRequired("calendar", "No Google user found.")];
     }
 
-    const key = `user-providers::${githubLogin}`;
+    const key = `user-providers::${userEmail}`;
     let stored;
     try {
       stored = await this.env.PROVIDERS_KV.get(key);
@@ -593,12 +586,12 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
   }
 
   private async getNotionContext(): Promise<[any, null] | [null, any]> {
-    const githubLogin = this.props?.login;
-    if (!githubLogin) {
-      return [null, this.authorizationRequired("notion", "No GitHub user found.")];
+    const userEmail = this.props?.email;
+    if (!userEmail) {
+      return [null, this.authorizationRequired("calendar", "No Google user found.")];
     }
 
-    const key = `user-providers::${githubLogin}`;
+    const key = `user-providers::${userEmail}`;
     let stored;
     try {
       stored = await this.env.PROVIDERS_KV.get(key);
@@ -632,12 +625,12 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
   }
 
   private async getSlackContext(): Promise<[any, null] | [null, any]> {
-    const githubLogin = this.props?.login;
-    if (!githubLogin) {
-      return [null, this.authorizationRequired("slack", "No GitHub user found.")];
+    const userEmail = this.props?.email;
+    if (!userEmail) {
+      return [null, this.authorizationRequired("calendar", "No Google user found.")];
     }
 
-    const key = `user-providers::${githubLogin}`;
+    const key = `user-providers::${userEmail}`;
     let stored;
     try {
       stored = await this.env.PROVIDERS_KV.get(key);

@@ -125,24 +125,38 @@ export async function fetchUpstreamAuthToken({
 }
 
 // Context from the auth process, encrypted & stored in the auth token
-export type Props = {
-  login: string;
-  name: string;
-  email: string;
+export interface Props {
+  [key: string]: unknown; // Index signature
+
+  // Google base auth (replaces GitHub)
   accessToken: string;
+  email: string;
+  name: string;
+
+  // Gmail integration
   gmailAccessToken?: string;
   gmailRefreshToken?: string;
+
+  // Calendar integration
   calendarAccessToken?: string;
   calendarRefreshToken?: string;
+
+  // Drive integration
   driveAccessToken?: string;
   driveRefreshToken?: string;
+
+  // Notion integration
   notionAccessToken?: string;
   notionRefreshToken?: string;
+
+  // Slack integration
   slackAccessToken?: string;
   slackRefreshToken?: string;
+
+  // Metadata
   connectedIntegrations: string[];
   workerUrl?: string;
-};
+}
 
 /**
  * Refreshes a Google OAuth token using a refresh token

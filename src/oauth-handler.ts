@@ -1,7 +1,6 @@
 import { env } from "cloudflare:workers";
 import type { AuthRequest, OAuthHelpers } from "@cloudflare/workers-oauth-provider";
 import { Hono } from "hono";
-import { Octokit } from "octokit";
 import { fetchUpstreamAuthToken, getUpstreamAuthorizeUrl, type Props } from "./utils";
 import {
   addApprovedClient,
@@ -35,18 +34,18 @@ interface NotionTokenResponse {
  * Handle direct provider authorization (when user clicks auth link from tool response)
  */
 async function handleDirectProviderAuth(c: any, provider: string) {
-  const githubLogin = c.req.query("user"); // Read from URL parameter
+  const googleEmail = c.req.query("user"); // Read from URL parameter (now email)
 
   console.log("=== DIRECT AUTH DEBUG ===");
   console.log("Provider:", provider);
-  console.log("GitHub login from URL:", githubLogin);
+  console.log("Google email from URL:", googleEmail);
 
   let existingProps: Props | null = null;
 
-  if (githubLogin) {
+  if (googleEmail) {
     try {
-      // Try to load existing providers from KV
-      const key = `user-providers::${githubLogin}`;
+      // Try to load existing providers from KV using email as key
+      const key = `user-providers::${googleEmail}`;
       console.log("Looking up KV key:", key);
 
       const stored = await c.env.PROVIDERS_KV.get(key);
@@ -56,10 +55,9 @@ async function handleDirectProviderAuth(c: any, provider: string) {
         const data = JSON.parse(stored);
 
         existingProps = {
-          login: githubLogin,
-          name: data.userData?.name || githubLogin,
-          email: data.userData?.email || "",
-          accessToken: data.providers?.github?.accessToken || "",
+          email: googleEmail,
+          name: data.userData?.name || googleEmail,
+          accessToken: data.providers?.google?.accessToken || "",
           gmailAccessToken: data.providers?.gmail?.accessToken,
           gmailRefreshToken: data.providers?.gmail?.refreshToken,
           calendarAccessToken: data.providers?.calendar?.accessToken,
@@ -74,12 +72,10 @@ async function handleDirectProviderAuth(c: any, provider: string) {
         console.log("Loaded existing integrations:", existingProps.connectedIntegrations);
       } else {
         console.log("⚠️ No existing KV data - first integration for this user");
-        // First integration - create minimal props with GitHub username
         existingProps = {
-          login: githubLogin,
-          name: githubLogin,
-          email: "",
-          accessToken: "", // Will be populated if they auth GitHub
+          email: googleEmail,
+          name: googleEmail,
+          accessToken: "",
           connectedIntegrations: [],
         } as Props;
       }
@@ -87,12 +83,9 @@ async function handleDirectProviderAuth(c: any, provider: string) {
       console.error("❌ Failed to load from KV:", err);
     }
   } else {
-    console.error("❌ No GitHub login in URL - cannot proceed with incremental auth");
-    console.error("User must have authenticated with GitHub first");
+    console.error("❌ No Google email in URL - cannot proceed with incremental auth");
+    console.error("User must have authenticated with Google first");
   }
-
-  console.log("Final existingProps:", existingProps ? "exists" : "null");
-  console.log("======================");
 
   const stateData = {
     oauthReqInfo: {} as AuthRequest,
@@ -126,12 +119,12 @@ app.get("/authorize", async (c) => {
   if (await isClientApproved(c.req.raw, clientId, env.COOKIE_ENCRYPTION_KEY)) {
     const stateData = {
       oauthReqInfo,
-      requestedProvider: requestedProvider || "github",
+      requestedProvider: requestedProvider || "google",
     };
     const { stateToken } = await createOAuthState(stateData, c.env.OAUTH_KV);
     const { setCookie: sessionBindingCookie } = await bindStateToSession(stateToken);
 
-    return redirectToProvider(c.req.raw, stateToken, requestedProvider || "github", {
+    return redirectToProvider(c.req.raw, stateToken, requestedProvider || "google", {
       "Set-Cookie": sessionBindingCookie,
     });
   }
@@ -144,7 +137,7 @@ app.get("/authorize", async (c) => {
   if (requestedProvider) {
     integrations.push(requestedProvider.charAt(0).toUpperCase() + requestedProvider.slice(1));
   } else {
-    integrations.push("GitHub");
+    integrations.push("Google");
     if (requestedScopes.includes("gmail")) integrations.push("Gmail");
     if (requestedScopes.includes("calendar")) integrations.push("Google Calendar");
     if (requestedScopes.includes("drive")) integrations.push("Google Drive");
@@ -161,7 +154,6 @@ app.get("/authorize", async (c) => {
     csrfToken,
     server: {
       description,
-      logo: "https://avatars.githubusercontent.com/u/314135?s=200&v=4",
       name: "Multi-Integration MCP Server",
     },
     setCookie,
@@ -194,7 +186,7 @@ app.post("/authorize", async (c) => {
 
     const stateData = {
       oauthReqInfo: state.oauthReqInfo,
-      requestedProvider: state.requestedProvider || "github",
+      requestedProvider: state.requestedProvider || "google",
     };
     const { stateToken } = await createOAuthState(stateData, c.env.OAUTH_KV);
     const { setCookie: sessionBindingCookie } = await bindStateToSession(stateToken);
@@ -218,13 +210,16 @@ async function redirectToProvider(request: Request, stateToken: string, provider
   let authUrl: string;
 
   switch (provider) {
-    case "github":
+    case "google":
+      // Base Google auth - requests email and profile
       authUrl = getUpstreamAuthorizeUrl({
-        client_id: env.GITHUB_CLIENT_ID,
-        redirect_uri: new URL("/callback/github", request.url).href,
-        scope: "read:user user:email",
+        client_id: env.GOOGLE_CLIENT_ID,
+        redirect_uri: new URL("/callback/google", request.url).href,
+        scope: "https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile",
         state: stateToken,
-        upstream_url: "https://github.com/login/oauth/authorize",
+        upstream_url: "https://accounts.google.com/o/oauth2/v2/auth",
+        access_type: "offline",
+        prompt: "consent",
       });
       break;
 
@@ -315,12 +310,11 @@ async function redirectToProvider(request: Request, stateToken: string, provider
   });
 }
 
-function resolveGitHubIdentity(userData: { login: string; name: string; email: string }, existingProps?: Props) {
-  if ((!userData.login || userData.login === "unknown-user") && existingProps?.login) {
+function resolveGoogleIdentity(userData: { email: string; name: string }, existingProps?: Props) {
+  if ((!userData.email || userData.email === "unknown-user@example.com") && existingProps?.email) {
     return {
-      login: existingProps.login,
       name: existingProps.name || userData.name,
-      email: existingProps.email || userData.email,
+      email: existingProps.email,
     };
   }
   return userData;
@@ -330,9 +324,9 @@ function resolveGitHubIdentity(userData: { login: string; name: string; email: s
  * Unified OAuth Callback Handler for all providers
  */
 app.get("/callback/:provider", async (c) => {
-  const provider = c.req.param("provider") as "github" | "gmail" | "calendar" | "drive" | "notion" | "slack";
+  const provider = c.req.param("provider") as "google" | "gmail" | "calendar" | "drive" | "notion" | "slack";
 
-  const supported = ["github", "gmail", "calendar", "drive", "notion", "slack"] as const;
+  const supported = ["google", "gmail", "calendar", "drive", "notion", "slack"] as const;
   if (!supported.includes(provider)) {
     return c.text(`Unsupported provider: ${provider}`, 400);
   }
@@ -356,20 +350,18 @@ app.get("/callback/:provider", async (c) => {
   console.log("=== CALLBACK DEBUG ===");
   console.log("Provider:", provider);
   console.log("existingProps:", existingProps ? "exists" : "null");
-  console.log("existingProps.login:", existingProps?.login);
+  console.log("existingProps.email:", existingProps?.email);
   console.log("===================");
 
-  // Start with GitHub identity if present
+  // Start with Google identity if present
   let userData = existingProps
     ? {
-        login: existingProps.login,
+        email: existingProps.email,
         name: existingProps.name,
-        email: existingProps.email || "",
       }
     : {
-        login: "unknown-user",
+        email: "unknown-user@example.com",
         name: "Unknown User",
-        email: "",
       };
 
   // Start with existing providers
@@ -377,7 +369,7 @@ app.get("/callback/:provider", async (c) => {
 
   if (existingProps) {
     if (existingProps.accessToken) {
-      mergedProviders.github = { accessToken: existingProps.accessToken };
+      mergedProviders.google = { accessToken: existingProps.accessToken };
     }
     if (existingProps.gmailAccessToken) {
       mergedProviders.gmail = {
@@ -411,37 +403,50 @@ app.get("/callback/:provider", async (c) => {
     }
   }
 
-  // =====================================================
   // Provider-specific token exchange
-  // =====================================================
   try {
-    if (provider === "github") {
+    if (provider === "google") {
+      // Base Google auth - get user profile
       const [tokenResult, err] = await fetchUpstreamAuthToken({
-        client_id: c.env.GITHUB_CLIENT_ID,
-        client_secret: c.env.GITHUB_CLIENT_SECRET,
+        client_id: c.env.GOOGLE_CLIENT_ID,
+        client_secret: c.env.GOOGLE_CLIENT_SECRET,
         code: c.req.query("code"),
         redirect_uri: callbackUrl,
-        upstream_url: "https://github.com/login/oauth/access_token",
+        upstream_url: "https://oauth2.googleapis.com/token",
       });
 
       if (err) {
-        console.error("GitHub token exchange failed:", err);
+        console.error("Google token exchange failed:", err);
         return err;
       }
 
       const accessToken = tokenResult.access_token;
 
-      const octokit = new Octokit({ auth: accessToken });
-      const { data: ghUser } = await octokit.rest.users.getAuthenticated();
+      // Fetch user info from Google
+      const userInfoResponse = await fetch("https://www.googleapis.com/oauth2/v2/userinfo", {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+        },
+      });
+
+      if (!userInfoResponse.ok) {
+        console.error("Failed to fetch Google user info");
+        return c.text("Failed to fetch user information", 500);
+      }
+
+      const userInfo = (await userInfoResponse.json()) as any;
 
       userData = {
-        login: ghUser.login,
-        name: ghUser.name || ghUser.login,
-        email: ghUser.email || "",
+        email: userInfo.email,
+        name: userInfo.name || userInfo.email,
       };
 
-      mergedProviders.github = { accessToken };
+      mergedProviders.google = {
+        accessToken,
+        refreshToken: tokenResult.refresh_token,
+      };
     } else if (provider === "slack") {
+      // Slack handling remains the same
       const res = await fetch("https://slack.com/api/oauth.v2.access", {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -470,6 +475,7 @@ app.get("/callback/:provider", async (c) => {
         refreshToken: data.refresh_token,
       };
     } else if (provider === "notion") {
+      // Notion handling remains the same
       const res = await fetch("https://api.notion.com/v1/oauth/token", {
         method: "POST",
         headers: {
@@ -525,20 +531,20 @@ app.get("/callback/:provider", async (c) => {
     return c.text(`Internal server error during ${provider} authorization: ${error.message}`, 500);
   }
 
-  // Enforce GitHub identity anchor
-  userData = resolveGitHubIdentity(userData, existingProps);
+  // Enforce Google identity anchor
+  userData = resolveGoogleIdentity(userData, existingProps);
 
   console.log("=== KV SAVE DEBUG ===");
   console.log("Provider:", provider);
-  console.log("userData.login:", userData.login);
+  console.log("userData.email:", userData.email);
   console.log("mergedProviders:", JSON.stringify(mergedProviders, null, 2));
   console.log("existingProps:", existingProps ? "exists" : "null");
   console.log("===================");
 
-  // Persist providers ONLY when GitHub exists
-  if (userData.login && userData.login !== "unknown-user") {
+  // Persist providers using email as key
+  if (userData.email && userData.email !== "unknown-user@example.com") {
     try {
-      const key = `user-providers::${userData.login}`;
+      const key = `user-providers::${userData.email}`;
 
       console.log("KV Key:", key);
 
@@ -554,7 +560,7 @@ app.get("/callback/:provider", async (c) => {
 
         providersToSave = {
           ...(parsed.providers || {}),
-          ...mergedProviders, // NEW TOKENS WIN
+          ...mergedProviders,
         };
         integrationsToSave = [...(parsed.connectedIntegrations || []), provider];
       }
@@ -579,7 +585,6 @@ app.get("/callback/:provider", async (c) => {
 
       console.log("✅ KV save successful");
 
-      // VERIFY IT WAS SAVED
       const verification = await c.env.PROVIDERS_KV.get(key);
       console.log("Verification read:", verification ? "✅ Data exists" : "❌ Data missing!");
       if (verification) {
@@ -593,10 +598,9 @@ app.get("/callback/:provider", async (c) => {
         stack: kvError.stack,
         name: kvError.name,
       });
-      // Continue anyway - token is still valid for this session
     }
   } else {
-    console.error("❌ Cannot save to KV - invalid user login:", userData.login);
+    console.error("❌ Cannot save to KV - invalid user email:", userData.email);
   }
 
   return completeAuthorization(c, {
@@ -616,7 +620,7 @@ async function completeAuthorization(
   params: {
     oauthReqInfo?: AuthRequest;
     providers: Record<string, any>;
-    userData?: { login: string; name: string; email: string };
+    userData?: { email: string; name: string };
     connectedIntegrations: string[];
     clearSessionCookie?: string;
     isDirect?: boolean;
@@ -625,22 +629,19 @@ async function completeAuthorization(
   const {
     oauthReqInfo = {} as AuthRequest,
     providers,
-    userData = { login: "user", name: "User", email: "" },
+    userData = { email: "user@example.com", name: "User" },
     connectedIntegrations,
     clearSessionCookie,
     isDirect = false,
   } = params;
 
-  // ───────────────────────────────────────────────────────────────
-  // Load persisted providers if this is a standard GitHub flow
-  // ───────────────────────────────────────────────────────────────
-  if (!isDirect && userData.login) {
-    const saved = await c.env.PROVIDERS_KV.get(`user-providers::${userData.login}`);
+  // Load persisted providers if this is a standard Google flow
+  if (!isDirect && userData.email) {
+    const saved = await c.env.PROVIDERS_KV.get(`user-providers::${userData.email}`);
 
     if (saved) {
       const parsed = JSON.parse(saved);
 
-      // Saved providers first, current flow overwrites
       Object.assign(parsed.providers || {}, providers);
       Object.assign(providers, parsed.providers || {});
 
@@ -648,14 +649,10 @@ async function completeAuthorization(
 
       connectedIntegrations.length = 0;
       connectedIntegrations.push(...merged);
-
-      if (!userData.email && parsed.userData?.email) {
-        userData.email = parsed.userData.email;
-      }
     }
   }
 
-  const accessToken = providers.github?.accessToken || "";
+  const accessToken = providers.google?.accessToken || "";
 
   if (isDirect && !oauthReqInfo.redirectUri) {
     const html = `
@@ -694,7 +691,6 @@ async function completeAuthorization(
     props: {
       accessToken,
       email: userData.email,
-      login: userData.login,
       name: userData.name,
       gmailAccessToken: providers.gmail?.accessToken,
       gmailRefreshToken: providers.gmail?.refreshToken,
@@ -710,7 +706,7 @@ async function completeAuthorization(
     } as Props,
     request: oauthReqInfo,
     scope: oauthReqInfo.scope || [],
-    userId: userData.login,
+    userId: userData.email, // Use email as userId
   });
 
   const headers = new Headers({ Location: redirectTo });
