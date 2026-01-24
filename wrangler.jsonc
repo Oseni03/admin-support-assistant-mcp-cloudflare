@@ -46,6 +46,14 @@
       "remote": true
     }
   ],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "cloudflare-mcp",
+      "database_id": "13a7bc65-938f-4561-a78d-06c00af758de",
+      "migrations_dir": "drizzle/migrations"
+    }
+  ],
   "ai": {
     "binding": "AI"
   },

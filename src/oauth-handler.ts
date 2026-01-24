@@ -13,6 +13,10 @@ import {
   validateCSRFToken,
   validateOAuthState,
 } from "./workers-oauth-utils";
+import { createDbClient, type DbClient } from "./db/client";
+import { IntegrationService } from "./services/integrations";
+import { eq } from "drizzle-orm";
+import * as schema from "./db/schema";
 
 const app = new Hono<{ Bindings: Env & { OAUTH_PROVIDER: OAuthHelpers } }>();
 
@@ -39,53 +43,106 @@ async function handleDirectProviderAuth(c: any, provider: string) {
   console.log("=== DIRECT AUTH DEBUG ===");
   console.log("Provider:", provider);
   console.log("Google email from URL:", googleEmail);
+  console.log("DB binding exists:", !!c.env.DB);
 
   let existingProps: Props | null = null;
 
   if (googleEmail) {
     try {
-      // Try to load existing providers from KV using email as key
-      const key = `user-providers::${googleEmail}`;
-      console.log("Looking up KV key:", key);
+      // Check if D1 binding exists
+      if (!c.env.DB) {
+        console.error("❌ D1 Database binding 'DB' not found in environment");
+        console.error("Make sure wrangler.toml has:");
+        console.error("[[d1_databases]]");
+        console.error('binding = "DB"');
+        console.error('database_name = "your-database-name"');
+        console.error('database_id = "xxxx-xxxx-xxxx"');
 
-      const stored = await c.env.PROVIDERS_KV.get(key);
-
-      if (stored) {
-        console.log("✅ Found existing KV data");
-        const data = JSON.parse(stored);
-
-        existingProps = {
-          email: googleEmail,
-          name: data.userData?.name || googleEmail,
-          accessToken: data.providers?.google?.accessToken || "",
-          gmailAccessToken: data.providers?.gmail?.accessToken,
-          gmailRefreshToken: data.providers?.gmail?.refreshToken,
-          calendarAccessToken: data.providers?.calendar?.accessToken,
-          calendarRefreshToken: data.providers?.calendar?.refreshToken,
-          driveAccessToken: data.providers?.drive?.accessToken,
-          driveRefreshToken: data.providers?.drive?.refreshToken,
-          notionAccessToken: data.providers?.notion?.accessToken,
-          slackAccessToken: data.providers?.slack?.accessToken,
-          connectedIntegrations: data.connectedIntegrations || [],
-        } as Props;
-
-        console.log("Loaded existing integrations:", existingProps.connectedIntegrations);
-      } else {
-        console.log("⚠️ No existing KV data - first integration for this user");
+        // Fall back to creating minimal props
         existingProps = {
           email: googleEmail,
           name: googleEmail,
           accessToken: "",
           connectedIntegrations: [],
         } as Props;
+      } else {
+        const db = createDbClient(c.env.DB);
+        const integrationService = new IntegrationService(db);
+
+        // Get user from database
+        const user = await db.query.user.findFirst({
+          where: eq(schema.user.email, googleEmail),
+        });
+
+        if (user) {
+          console.log("✅ Found existing user in database:", user.id);
+
+          // Get all user integrations
+          const integrations = await integrationService.getUserIntegrations(user.id);
+
+          existingProps = {
+            email: user.email,
+            name: user.name,
+            accessToken: "",
+            connectedIntegrations: integrations.map((i) => i.provider),
+          } as Props;
+
+          // Map integrations to Props structure
+          for (const integration of integrations) {
+            if (integration.provider === "google") {
+              existingProps.accessToken = integration.accessToken;
+            } else if (integration.provider === "gmail") {
+              existingProps.gmailAccessToken = integration.accessToken;
+              existingProps.gmailRefreshToken = integration.refreshToken || undefined;
+            } else if (integration.provider === "calendar") {
+              existingProps.calendarAccessToken = integration.accessToken;
+              existingProps.calendarRefreshToken = integration.refreshToken || undefined;
+            } else if (integration.provider === "drive") {
+              existingProps.driveAccessToken = integration.accessToken;
+              existingProps.driveRefreshToken = integration.refreshToken || undefined;
+            } else if (integration.provider === "notion") {
+              existingProps.notionAccessToken = integration.accessToken;
+            } else if (integration.provider === "slack") {
+              existingProps.slackAccessToken = integration.accessToken;
+            }
+          }
+
+          console.log("Loaded existing integrations:", existingProps.connectedIntegrations);
+        } else {
+          console.log("⚠️ No existing user found in database");
+          console.log("User should authenticate with Google first");
+
+          existingProps = {
+            email: googleEmail,
+            name: googleEmail,
+            accessToken: "",
+            connectedIntegrations: [],
+          } as Props;
+        }
       }
     } catch (err: any) {
-      console.error("❌ Failed to load from KV:", err);
+      console.error("❌ Failed to load from database:", err);
+      console.error("Error details:", {
+        message: err.message,
+        stack: err.stack,
+        name: err.name,
+      });
+
+      // Create fallback props
+      existingProps = {
+        email: googleEmail,
+        name: googleEmail,
+        accessToken: "",
+        connectedIntegrations: [],
+      } as Props;
     }
   } else {
     console.error("❌ No Google email in URL - cannot proceed with incremental auth");
     console.error("User must have authenticated with Google first");
   }
+
+  console.log("Final existingProps:", existingProps);
+  console.log("======================");
 
   const stateData = {
     oauthReqInfo: {} as AuthRequest,
@@ -211,7 +268,6 @@ async function redirectToProvider(request: Request, stateToken: string, provider
 
   switch (provider) {
     case "google":
-      // Base Google auth - requests email and profile
       authUrl = getUpstreamAuthorizeUrl({
         client_id: env.GOOGLE_CLIENT_ID,
         redirect_uri: new URL("/callback/google", request.url).href,
@@ -406,7 +462,6 @@ app.get("/callback/:provider", async (c) => {
   // Provider-specific token exchange
   try {
     if (provider === "google") {
-      // Base Google auth - get user profile
       const [tokenResult, err] = await fetchUpstreamAuthToken({
         client_id: c.env.GOOGLE_CLIENT_ID,
         client_secret: c.env.GOOGLE_CLIENT_SECRET,
@@ -422,7 +477,6 @@ app.get("/callback/:provider", async (c) => {
 
       const accessToken = tokenResult.access_token;
 
-      // Fetch user info from Google
       const userInfoResponse = await fetch("https://www.googleapis.com/oauth2/v2/userinfo", {
         headers: {
           Authorization: `Bearer ${accessToken}`,
@@ -445,8 +499,76 @@ app.get("/callback/:provider", async (c) => {
         accessToken,
         refreshToken: tokenResult.refresh_token,
       };
+
+      // ============================================================
+      // CRITICAL: Create user immediately upon Google authentication
+      // ============================================================
+      console.log("=== GOOGLE AUTH - CREATING USER ===");
+      try {
+        const db = createDbClient(c.env.DB);
+
+        // Check if user exists
+        let user = await db.query.user.findFirst({
+          where: eq(schema.user.email, userData.email),
+        });
+
+        if (!user) {
+          console.log("Creating new user for:", userData.email);
+          const userId = crypto.randomUUID();
+
+          await db.insert(schema.user).values({
+            id: userId,
+            email: userData.email,
+            name: userData.name,
+            emailVerified: true, // Google has already verified the email
+            image: userInfo.picture || null,
+            createdAt: new Date(),
+            updatedAt: new Date(),
+          });
+
+          console.log("✅ User created successfully:", userId);
+
+          // Fetch the newly created user
+          user = await db.query.user.findFirst({
+            where: eq(schema.user.email, userData.email),
+          });
+        } else {
+          console.log("User already exists:", user.id);
+
+          // Update user info if changed
+          await db
+            .update(schema.user)
+            .set({
+              name: userData.name,
+              image: userInfo.picture || user.image,
+              emailVerified: true,
+              updatedAt: new Date(),
+            })
+            .where(eq(schema.user.id, user.id));
+
+          console.log("✅ User updated successfully");
+        }
+
+        // Save Google integration immediately
+        if (user) {
+          const integrationService = new IntegrationService(db);
+
+          await integrationService.saveIntegration({
+            userId: user.id,
+            provider: "google",
+            accessToken: accessToken,
+            refreshToken: tokenResult.refresh_token,
+            scope: "https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile",
+          });
+
+          console.log("✅ Google integration saved");
+        }
+      } catch (dbError: any) {
+        console.error("❌ Failed to create user during Google auth:", dbError);
+        // Don't fail the auth flow, but log the error
+      }
+      console.log("=================================");
     } else if (provider === "slack") {
-      // Slack handling remains the same
       const res = await fetch("https://slack.com/api/oauth.v2.access", {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -475,7 +597,6 @@ app.get("/callback/:provider", async (c) => {
         refreshToken: data.refresh_token,
       };
     } else if (provider === "notion") {
-      // Notion handling remains the same
       const res = await fetch("https://api.notion.com/v1/oauth/token", {
         method: "POST",
         headers: {
@@ -534,73 +655,82 @@ app.get("/callback/:provider", async (c) => {
   // Enforce Google identity anchor
   userData = resolveGoogleIdentity(userData, existingProps);
 
-  console.log("=== KV SAVE DEBUG ===");
+  console.log("=== DATABASE SAVE DEBUG ===");
   console.log("Provider:", provider);
   console.log("userData.email:", userData.email);
   console.log("mergedProviders:", JSON.stringify(mergedProviders, null, 2));
-  console.log("existingProps:", existingProps ? "exists" : "null");
   console.log("===================");
 
-  // Persist providers using email as key
-  if (userData.email && userData.email !== "unknown-user@example.com") {
+  // Persist to database (for non-Google providers)
+  // Google provider already saved the user and integration above
+  if (userData.email && userData.email !== "unknown-user@example.com" && provider !== "google") {
     try {
-      const key = `user-providers::${userData.email}`;
+      const db = createDbClient(c.env.DB);
+      const integrationService = new IntegrationService(db);
 
-      console.log("KV Key:", key);
-
-      const existing = await c.env.PROVIDERS_KV.get(key);
-      console.log("Existing KV data:", existing ? "found" : "not found");
-
-      let providersToSave = { ...mergedProviders };
-      let integrationsToSave = [...(existingProps?.connectedIntegrations || []), provider];
-
-      if (existing) {
-        const parsed = JSON.parse(existing);
-        console.log("Parsed existing providers:", JSON.stringify(parsed.providers, null, 2));
-
-        providersToSave = {
-          ...(parsed.providers || {}),
-          ...mergedProviders,
-        };
-        integrationsToSave = [...(parsed.connectedIntegrations || []), provider];
-      }
-
-      console.log("Providers to save:", JSON.stringify(providersToSave, null, 2));
-      console.log("Integrations to save:", integrationsToSave);
-
-      const dataToSave = {
-        providers: providersToSave,
-        connectedIntegrations: Array.from(new Set(integrationsToSave)),
-        userData,
-        updatedAt: new Date().toISOString(),
-      };
-
-      console.log("Full data to save:", JSON.stringify(dataToSave, null, 2));
-
-      await c.env.PROVIDERS_KV.put(
-        key,
-        JSON.stringify(dataToSave),
-        { expirationTtl: 7776000 }, // 90 days
-      );
-
-      console.log("✅ KV save successful");
-
-      const verification = await c.env.PROVIDERS_KV.get(key);
-      console.log("Verification read:", verification ? "✅ Data exists" : "❌ Data missing!");
-      if (verification) {
-        const verifiedData = JSON.parse(verification);
-        console.log("Verified gmail token exists:", !!verifiedData.providers?.gmail?.accessToken);
-      }
-    } catch (kvError: any) {
-      console.error("❌ Failed to persist providers to KV:", kvError);
-      console.error("Error details:", {
-        message: kvError.message,
-        stack: kvError.stack,
-        name: kvError.name,
+      // Find user (should exist from Google auth)
+      let user = await db.query.user.findFirst({
+        where: eq(schema.user.email, userData.email),
       });
+
+      if (!user) {
+        console.warn("⚠️ User not found for incremental auth. This shouldn't happen!");
+        console.warn("Creating user as fallback...");
+
+        const userId = crypto.randomUUID();
+        await db.insert(schema.user).values({
+          id: userId,
+          email: userData.email,
+          name: userData.name,
+          emailVerified: false,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        });
+
+        user = await db.query.user.findFirst({
+          where: eq(schema.user.email, userData.email),
+        });
+      }
+
+      if (!user) {
+        throw new Error("Failed to create or retrieve user");
+      }
+
+      console.log("Saving integration for user:", user.id);
+
+      // Save the current provider's integration
+      const currentProvider = mergedProviders[provider];
+      if (currentProvider) {
+        await integrationService.saveIntegration({
+          userId: user.id,
+          provider: provider,
+          accessToken: currentProvider.accessToken,
+          refreshToken: currentProvider.refreshToken,
+          scope: undefined, // Provider-specific scope if needed
+        });
+
+        console.log(`✅ ${provider} integration saved`);
+      }
+
+      // Verify save
+      const savedIntegrations = await integrationService.getUserIntegrations(user.id);
+      console.log(
+        "Verified integrations:",
+        savedIntegrations.map((i) => i.provider),
+      );
+    } catch (dbError: any) {
+      console.error("❌ Failed to persist to database:", dbError);
+      console.error("Error details:", {
+        message: dbError.message,
+        stack: dbError.stack,
+        name: dbError.name,
+      });
+      // Don't fail the auth flow, but log the error
     }
+  } else if (provider === "google") {
+    console.log("ℹ️ Google provider - user already created and saved above");
   } else {
-    console.error("❌ Cannot save to KV - invalid user email:", userData.email);
+    console.error("❌ Cannot save to database - invalid user email:", userData.email);
   }
 
   return completeAuthorization(c, {
@@ -635,20 +765,37 @@ async function completeAuthorization(
     isDirect = false,
   } = params;
 
-  // Load persisted providers if this is a standard Google flow
+  // Load persisted providers from database if standard Google flow
   if (!isDirect && userData.email) {
-    const saved = await c.env.PROVIDERS_KV.get(`user-providers::${userData.email}`);
+    try {
+      const db = createDbClient(c.env.DB);
+      const integrationService = new IntegrationService(db);
 
-    if (saved) {
-      const parsed = JSON.parse(saved);
+      const user = await db.query.user.findFirst({
+        where: eq(schema.user.email, userData.email),
+      });
 
-      Object.assign(parsed.providers || {}, providers);
-      Object.assign(providers, parsed.providers || {});
+      if (user) {
+        const savedIntegrations = await integrationService.getUserIntegrations(user.id);
 
-      const merged = new Set([...connectedIntegrations, ...(parsed.connectedIntegrations || [])]);
+        // Merge saved integrations with current ones
+        for (const integration of savedIntegrations) {
+          if (!providers[integration.provider]) {
+            providers[integration.provider] = {
+              accessToken: integration.accessToken,
+              refreshToken: integration.refreshToken,
+            };
+          }
+        }
 
-      connectedIntegrations.length = 0;
-      connectedIntegrations.push(...merged);
+        // Update connected integrations list
+        const allIntegrations = new Set([...connectedIntegrations, ...savedIntegrations.map((i) => i.provider)]);
+
+        connectedIntegrations.length = 0;
+        connectedIntegrations.push(...allIntegrations);
+      }
+    } catch (error: any) {
+      console.error("Error loading from database:", error);
     }
   }
 
@@ -656,7 +803,7 @@ async function completeAuthorization(
 
   if (isDirect && !oauthReqInfo.redirectUri) {
     const html = `
-            <!DOCTYPE html>
+      <!DOCTYPE html>
       <html>
         <head>
           <title>Authorization Successful</title>
@@ -670,7 +817,7 @@ async function completeAuthorization(
         </head>
         <body>
           <div class="card">
-            <h1>✓ Authorization Successful</h1>
+            <h1>Authorization Successful</h1>
             <p>You have successfully connected <strong>${connectedIntegrations.join(", ")}</strong>.</p>
             <p>You can now return to the application to continue.</p>
           </div>
@@ -706,7 +853,7 @@ async function completeAuthorization(
     } as Props,
     request: oauthReqInfo,
     scope: oauthReqInfo.scope || [],
-    userId: userData.email, // Use email as userId
+    userId: userData.email,
   });
 
   const headers = new Headers({ Location: redirectTo });

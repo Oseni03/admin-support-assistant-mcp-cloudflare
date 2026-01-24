@@ -10,20 +10,28 @@
     "type-check": "tsc --noEmit"
   },
   "dependencies": {
+    "@better-auth/cli": "^1.4.17",
     "@cloudflare/workers-oauth-provider": "^0.2.2",
+    "@libsql/client": "^0.17.0",
     "@notionhq/client": "^5.7.0",
     "@slack/web-api": "^7.13.0",
     "agents": "^0.3.1",
+    "better-auth": "^1.4.17",
+    "dotenv": "^17.2.3",
+    "drizzle-orm": "^0.45.1",
     "google-auth-library": "^10.5.0",
     "googleapis": "^170.1.0",
     "hono": "^4.11.3",
     "just-pick": "^4.2.0",
     "octokit": "^5.0.5",
+    "wrangler": "^4.60.0",
     "zod": "^4.2.1"
   },
   "devDependencies": {
     "@types/node": "^25.0.9",
+    "drizzle-kit": "^0.31.8",
     "prettier": "^3.7.4",
+    "tsx": "^4.21.0",
     "typescript": "5.9.3"
   }
 }

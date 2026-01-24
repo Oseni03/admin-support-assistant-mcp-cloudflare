@@ -15,14 +15,31 @@ import { createSlackContext } from "./tools/slack/context";
 import { createDriveContext } from "./tools/google-drive/context";
 import { driveTools } from "./tools/google-drive";
 import { Props } from "./utils";
+import { Auth, createAuth } from "./lib/auth";
+import { createDbClient, DbClient } from "./db/client";
+import { IntegrationService } from "./services/integrations";
+import { BillingService } from "./services/billing";
+import { eq } from "drizzle-orm";
+import * as schema from "./db/schema";
 
 export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
+  private auth!: Auth;
+  private db!: DbClient;
+  private integrations!: IntegrationService;
+  private billing!: BillingService;
+
   server = new McpServer({
     name: "Admin Assistant MCP with Google, Gmail, Calendar, Drive, Notion & Slack Integrations",
     version: "1.0.0",
   });
 
   async init() {
+    // Initialize services
+    this.auth = createAuth(this.env);
+    this.db = createDbClient(this.env.DB); // D1 database binding
+    this.integrations = new IntegrationService(this.db);
+    this.billing = new BillingService(this.db);
+
     // Register the integrations resource
     this.server.registerResource(
       "integrations-list",
@@ -452,215 +469,213 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
   private async getGmailContext(): Promise<[any, null] | [null, any]> {
     const userEmail = this.props?.email;
     if (!userEmail) {
-      return [null, this.authorizationRequired("gmail", "No Google user found.")];
+      return [null, this.authorizationRequired("gmail", "No user found.")];
     }
 
-    const key = `user-providers::${userEmail}`;
-    let stored;
     try {
-      stored = await this.env.PROVIDERS_KV.get(key);
-    } catch (error: any) {
-      console.error("Failed to read from KV:", error);
-    }
-
-    let gmail;
-
-    if (stored) {
-      try {
-        const data = JSON.parse(stored);
-        gmail = data.providers?.gmail;
-      } catch (error: any) {
-        console.error("Failed to parse KV data:", error);
+      // Check if DB binding exists
+      if (!this.env.DB) {
+        console.error("D1 Database binding 'DB' not found in environment");
+        return [null, this.authorizationRequired("gmail", "Database not configured.")];
       }
+
+      // Get user from database
+      const user = await this.db.query.user.findFirst({
+        where: eq(schema.user.email, userEmail),
+      });
+
+      if (!user) {
+        console.log("User not found in database:", userEmail);
+        return [null, this.authorizationRequired("gmail", "User not found. Please authenticate with Google first.")];
+      }
+
+      // Get integration from database
+      const gmailIntegration = await this.integrations.getIntegration(user.id, "gmail");
+
+      if (!gmailIntegration?.accessToken) {
+        return [null, this.authorizationRequired("gmail", "Gmail not connected. Please authorize Gmail integration.")];
+      }
+
+      const oauth = new OAuth2Client();
+      oauth.setCredentials({
+        access_token: gmailIntegration.accessToken,
+        refresh_token: gmailIntegration.refreshToken,
+      });
+
+      return [createGmailContext(oauth), null];
+    } catch (error: any) {
+      console.error("Error in getGmailContext:", error);
+      return [
+        null,
+        {
+          content: [{ type: "text", text: `Database error: ${error.message}` }],
+        },
+      ];
     }
-
-    if (!gmail && this.props?.gmailAccessToken) {
-      gmail = {
-        accessToken: this.props.gmailAccessToken,
-        refreshToken: this.props.gmailRefreshToken,
-      };
-    }
-
-    if (!gmail?.accessToken) {
-      return [null, this.authorizationRequired("gmail", "Gmail not connected. Please authorize Gmail integration.")];
-    }
-
-    const oauth = new OAuth2Client();
-    oauth.setCredentials({
-      access_token: gmail.accessToken,
-      refresh_token: gmail.refreshToken,
-    });
-
-    return [createGmailContext(oauth), null];
   }
 
-  // Similar updates for other context getters...
   private async getCalendarContext(): Promise<[any, null] | [null, any]> {
     const userEmail = this.props?.email;
     if (!userEmail) {
-      return [null, this.authorizationRequired("calendar", "No Google user found.")];
+      return [null, this.authorizationRequired("calendar", "No user found.")];
     }
 
-    const key = `user-providers::${userEmail}`;
-    let stored;
     try {
-      stored = await this.env.PROVIDERS_KV.get(key);
-    } catch (error: any) {
-      console.error("Failed to read from KV:", error);
-    }
-
-    let calendar;
-
-    if (stored) {
-      try {
-        const data = JSON.parse(stored);
-        calendar = data.providers?.calendar;
-      } catch (error: any) {
-        console.error("Failed to parse KV data:", error);
+      if (!this.env.DB) {
+        console.error("D1 Database binding 'DB' not found");
+        return [null, this.authorizationRequired("calendar", "Database not configured.")];
       }
+
+      const user = await this.db.query.user.findFirst({
+        where: eq(schema.user.email, userEmail),
+      });
+
+      if (!user) {
+        return [null, this.authorizationRequired("calendar", "User not found.")];
+      }
+
+      const calendarIntegration = await this.integrations.getIntegration(user.id, "calendar");
+
+      if (!calendarIntegration?.accessToken) {
+        return [null, this.authorizationRequired("calendar", "Calendar not connected.")];
+      }
+
+      const oauth = new OAuth2Client();
+      oauth.setCredentials({
+        access_token: calendarIntegration.accessToken,
+        refresh_token: calendarIntegration.refreshToken,
+      });
+
+      return [createCalendarContext(oauth), null];
+    } catch (error: any) {
+      console.error("Error in getCalendarContext:", error);
+      return [
+        null,
+        {
+          content: [{ type: "text", text: `Database error: ${error.message}` }],
+        },
+      ];
     }
-
-    if (!calendar && this.props?.calendarAccessToken) {
-      calendar = {
-        accessToken: this.props.calendarAccessToken,
-        refreshToken: this.props.calendarRefreshToken,
-      };
-    }
-
-    if (!calendar?.accessToken) {
-      return [null, this.authorizationRequired("calendar", "Google Calendar not connected. Please authorize Calendar integration.")];
-    }
-
-    const oauth = new OAuth2Client();
-    oauth.setCredentials({
-      access_token: calendar.accessToken,
-      refresh_token: calendar.refreshToken,
-    });
-
-    return [createCalendarContext(oauth), null];
   }
 
   private async getDriveContext(): Promise<[any, null] | [null, any]> {
     const userEmail = this.props?.email;
     if (!userEmail) {
-      return [null, this.authorizationRequired("calendar", "No Google user found.")];
+      return [null, this.authorizationRequired("drive", "No user found.")];
     }
 
-    const key = `user-providers::${userEmail}`;
-    let stored;
     try {
-      stored = await this.env.PROVIDERS_KV.get(key);
-    } catch (error: any) {
-      console.error("Failed to read from KV:", error);
-    }
-
-    let drive;
-
-    if (stored) {
-      try {
-        const data = JSON.parse(stored);
-        drive = data.providers?.drive;
-      } catch (error: any) {
-        console.error("Failed to parse KV data:", error);
+      if (!this.env.DB) {
+        console.error("D1 Database binding 'DB' not found");
+        return [null, this.authorizationRequired("drive", "Database not configured.")];
       }
+
+      const user = await this.db.query.user.findFirst({
+        where: eq(schema.user.email, userEmail),
+      });
+
+      if (!user) {
+        return [null, this.authorizationRequired("drive", "User not found.")];
+      }
+
+      const driveIntegration = await this.integrations.getIntegration(user.id, "drive");
+
+      if (!driveIntegration?.accessToken) {
+        return [null, this.authorizationRequired("drive", "Google Drive not connected.")];
+      }
+
+      const oauth = new OAuth2Client();
+      oauth.setCredentials({
+        access_token: driveIntegration.accessToken,
+        refresh_token: driveIntegration.refreshToken,
+      });
+
+      return [createDriveContext(oauth), null];
+    } catch (error: any) {
+      console.error("Error in getDriveContext:", error);
+      return [
+        null,
+        {
+          content: [{ type: "text", text: `Database error: ${error.message}` }],
+        },
+      ];
     }
-
-    if (!drive && this.props?.driveAccessToken) {
-      drive = {
-        accessToken: this.props.driveAccessToken,
-        refreshToken: this.props.driveRefreshToken,
-      };
-    }
-
-    if (!drive?.accessToken) {
-      return [null, this.authorizationRequired("drive", "Google Drive not connected. Please authorize Drive integration.")];
-    }
-
-    const oauth = new OAuth2Client();
-    oauth.setCredentials({
-      access_token: drive.accessToken,
-      refresh_token: drive.refreshToken,
-    });
-
-    return [createDriveContext(oauth), null];
   }
 
   private async getNotionContext(): Promise<[any, null] | [null, any]> {
     const userEmail = this.props?.email;
     if (!userEmail) {
-      return [null, this.authorizationRequired("calendar", "No Google user found.")];
+      return [null, this.authorizationRequired("notion", "No user found.")];
     }
 
-    const key = `user-providers::${userEmail}`;
-    let stored;
     try {
-      stored = await this.env.PROVIDERS_KV.get(key);
-    } catch (error: any) {
-      console.error("Failed to read from KV:", error);
-    }
-
-    let notion;
-
-    if (stored) {
-      try {
-        const data = JSON.parse(stored);
-        notion = data.providers?.notion;
-      } catch (error: any) {
-        console.error("Failed to parse KV data:", error);
+      if (!this.env.DB) {
+        console.error("D1 Database binding 'DB' not found");
+        return [null, this.authorizationRequired("notion", "Database not configured.")];
       }
-    }
 
-    if (!notion && this.props?.notionAccessToken) {
-      notion = {
-        accessToken: this.props.notionAccessToken,
-        refreshToken: this.props.notionRefreshToken,
-      };
-    }
+      const user = await this.db.query.user.findFirst({
+        where: eq(schema.user.email, userEmail),
+      });
 
-    if (!notion?.accessToken) {
-      return [null, this.authorizationRequired("notion", "Notion not connected. Please authorize Notion integration.")];
-    }
+      if (!user) {
+        return [null, this.authorizationRequired("notion", "User not found.")];
+      }
 
-    return [createNotionContext(notion.accessToken), null];
+      const notionIntegration = await this.integrations.getIntegration(user.id, "notion");
+
+      if (!notionIntegration?.accessToken) {
+        return [null, this.authorizationRequired("notion", "Notion not connected.")];
+      }
+
+      return [createNotionContext(notionIntegration.accessToken), null];
+    } catch (error: any) {
+      console.error("Error in getNotionContext:", error);
+      return [
+        null,
+        {
+          content: [{ type: "text", text: `Database error: ${error.message}` }],
+        },
+      ];
+    }
   }
 
   private async getSlackContext(): Promise<[any, null] | [null, any]> {
     const userEmail = this.props?.email;
     if (!userEmail) {
-      return [null, this.authorizationRequired("calendar", "No Google user found.")];
+      return [null, this.authorizationRequired("slack", "No user found.")];
     }
 
-    const key = `user-providers::${userEmail}`;
-    let stored;
     try {
-      stored = await this.env.PROVIDERS_KV.get(key);
-    } catch (error: any) {
-      console.error("Failed to read from KV:", error);
-    }
-
-    let slack;
-
-    if (stored) {
-      try {
-        const data = JSON.parse(stored);
-        slack = data.providers?.slack;
-      } catch (error: any) {
-        console.error("Failed to parse KV data:", error);
+      if (!this.env.DB) {
+        console.error("D1 Database binding 'DB' not found");
+        return [null, this.authorizationRequired("slack", "Database not configured.")];
       }
-    }
 
-    if (!slack && this.props?.slackAccessToken) {
-      slack = {
-        accessToken: this.props.slackAccessToken,
-        refreshToken: this.props.slackRefreshToken,
-      };
-    }
+      const user = await this.db.query.user.findFirst({
+        where: eq(schema.user.email, userEmail),
+      });
 
-    if (!slack?.accessToken) {
-      return [null, this.authorizationRequired("slack", "Slack not connected. Please authorize Slack integration.")];
-    }
+      if (!user) {
+        return [null, this.authorizationRequired("slack", "User not found.")];
+      }
 
-    return [createSlackContext(slack.accessToken), null];
+      const slackIntegration = await this.integrations.getIntegration(user.id, "slack");
+
+      if (!slackIntegration?.accessToken) {
+        return [null, this.authorizationRequired("slack", "Slack not connected.")];
+      }
+
+      return [createSlackContext(slackIntegration.accessToken), null];
+    } catch (error: any) {
+      console.error("Error in getSlackContext:", error);
+      return [
+        null,
+        {
+          content: [{ type: "text", text: `Database error: ${error.message}` }],
+        },
+      ];
+    }
   }
 }
 
