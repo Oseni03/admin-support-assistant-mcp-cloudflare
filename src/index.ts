@@ -2,7 +2,7 @@ import OAuthProvider from "@cloudflare/workers-oauth-provider";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { McpAgent } from "agents/mcp";
 import { z } from "zod";
-import { OAuthHandler } from "./oauth-handler";
+import { OAuthHandler } from "./routes/oauth-handler";
 import { OAuth2Client } from "google-auth-library";
 import { gmailTools } from "./tools/gmail";
 import { createGmailContext } from "./tools/gmail/context";

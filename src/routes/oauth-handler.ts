@@ -1,7 +1,7 @@
 import { env } from "cloudflare:workers";
 import type { AuthRequest, OAuthHelpers } from "@cloudflare/workers-oauth-provider";
 import { Hono } from "hono";
-import { fetchUpstreamAuthToken, getUpstreamAuthorizeUrl, type Props } from "./utils";
+import { fetchUpstreamAuthToken, getUpstreamAuthorizeUrl, type Props } from "../utils";
 import {
   addApprovedClient,
   bindStateToSession,
@@ -12,38 +12,19 @@ import {
   renderApprovalDialog,
   validateCSRFToken,
   validateOAuthState,
-} from "./workers-oauth-utils";
-import { createDbClient, type DbClient } from "./db/client";
-import { IntegrationService } from "./services/integrations";
+} from "../workers-oauth-utils";
+import { createDbClient, type DbClient } from "../db/client";
+import { IntegrationService } from "../services/integrations";
 import { eq } from "drizzle-orm";
-import * as schema from "./db/schema";
+import * as schema from "../db/schema";
 
 const app = new Hono<{ Bindings: Env & { OAUTH_PROVIDER: OAuthHelpers } }>();
-
-interface NotionTokenResponse {
-  access_token: string;
-  refresh_token: string;
-  bot_id: string;
-  workspace_name: string;
-  workspace_icon: string;
-  workspace_id: string;
-  owner?: {
-    type: string;
-    name?: any;
-    person?: { email: string };
-  };
-}
 
 /**
  * Handle direct provider authorization (when user clicks auth link from tool response)
  */
 async function handleDirectProviderAuth(c: any, provider: string) {
   const googleEmail = c.req.query("user"); // Read from URL parameter (now email)
-
-  console.log("=== DIRECT AUTH DEBUG ===");
-  console.log("Provider:", provider);
-  console.log("Google email from URL:", googleEmail);
-  console.log("DB binding exists:", !!c.env.DB);
 
   let existingProps: Props | null = null;
 
@@ -52,11 +33,6 @@ async function handleDirectProviderAuth(c: any, provider: string) {
       // Check if D1 binding exists
       if (!c.env.DB) {
         console.error("❌ D1 Database binding 'DB' not found in environment");
-        console.error("Make sure wrangler.toml has:");
-        console.error("[[d1_databases]]");
-        console.error('binding = "DB"');
-        console.error('database_name = "your-database-name"');
-        console.error('database_id = "xxxx-xxxx-xxxx"');
 
         // Fall back to creating minimal props
         existingProps = {
@@ -106,8 +82,6 @@ async function handleDirectProviderAuth(c: any, provider: string) {
               existingProps.slackAccessToken = integration.accessToken;
             }
           }
-
-          console.log("Loaded existing integrations:", existingProps.connectedIntegrations);
         } else {
           console.log("⚠️ No existing user found in database");
           console.log("User should authenticate with Google first");
@@ -140,9 +114,6 @@ async function handleDirectProviderAuth(c: any, provider: string) {
     console.error("❌ No Google email in URL - cannot proceed with incremental auth");
     console.error("User must have authenticated with Google first");
   }
-
-  console.log("Final existingProps:", existingProps);
-  console.log("======================");
 
   const stateData = {
     oauthReqInfo: {} as AuthRequest,
@@ -403,12 +374,6 @@ app.get("/callback/:provider", async (c) => {
   const callbackUrl = new URL(`/callback/${provider}`, c.req.url).href;
   const existingProps = stateData.existingProps as Props | undefined;
 
-  console.log("=== CALLBACK DEBUG ===");
-  console.log("Provider:", provider);
-  console.log("existingProps:", existingProps ? "exists" : "null");
-  console.log("existingProps.email:", existingProps?.email);
-  console.log("===================");
-
   // Start with Google identity if present
   let userData = existingProps
     ? {
@@ -503,7 +468,6 @@ app.get("/callback/:provider", async (c) => {
       // ============================================================
       // CRITICAL: Create user immediately upon Google authentication
       // ============================================================
-      console.log("=== GOOGLE AUTH - CREATING USER ===");
       try {
         const db = createDbClient(c.env.DB);
 
@@ -513,7 +477,6 @@ app.get("/callback/:provider", async (c) => {
         });
 
         if (!user) {
-          console.log("Creating new user for:", userData.email);
           const userId = crypto.randomUUID();
 
           await db.insert(schema.user).values({
@@ -526,15 +489,11 @@ app.get("/callback/:provider", async (c) => {
             updatedAt: new Date(),
           });
 
-          console.log("✅ User created successfully:", userId);
-
           // Fetch the newly created user
           user = await db.query.user.findFirst({
             where: eq(schema.user.email, userData.email),
           });
         } else {
-          console.log("User already exists:", user.id);
-
           // Update user info if changed
           await db
             .update(schema.user)
@@ -545,8 +504,6 @@ app.get("/callback/:provider", async (c) => {
               updatedAt: new Date(),
             })
             .where(eq(schema.user.id, user.id));
-
-          console.log("✅ User updated successfully");
         }
 
         // Save Google integration immediately
@@ -560,14 +517,11 @@ app.get("/callback/:provider", async (c) => {
             refreshToken: tokenResult.refresh_token,
             scope: "https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile",
           });
-
-          console.log("✅ Google integration saved");
         }
       } catch (dbError: any) {
         console.error("❌ Failed to create user during Google auth:", dbError);
         // Don't fail the auth flow, but log the error
       }
-      console.log("=================================");
     } else if (provider === "slack") {
       const res = await fetch("https://slack.com/api/oauth.v2.access", {
         method: "POST",
@@ -655,12 +609,6 @@ app.get("/callback/:provider", async (c) => {
   // Enforce Google identity anchor
   userData = resolveGoogleIdentity(userData, existingProps);
 
-  console.log("=== DATABASE SAVE DEBUG ===");
-  console.log("Provider:", provider);
-  console.log("userData.email:", userData.email);
-  console.log("mergedProviders:", JSON.stringify(mergedProviders, null, 2));
-  console.log("===================");
-
   // Persist to database (for non-Google providers)
   // Google provider already saved the user and integration above
   if (userData.email && userData.email !== "unknown-user@example.com" && provider !== "google") {
@@ -696,8 +644,6 @@ app.get("/callback/:provider", async (c) => {
         throw new Error("Failed to create or retrieve user");
       }
 
-      console.log("Saving integration for user:", user.id);
-
       // Save the current provider's integration
       const currentProvider = mergedProviders[provider];
       if (currentProvider) {
@@ -708,16 +654,10 @@ app.get("/callback/:provider", async (c) => {
           refreshToken: currentProvider.refreshToken,
           scope: undefined, // Provider-specific scope if needed
         });
-
-        console.log(`✅ ${provider} integration saved`);
       }
 
       // Verify save
-      const savedIntegrations = await integrationService.getUserIntegrations(user.id);
-      console.log(
-        "Verified integrations:",
-        savedIntegrations.map((i) => i.provider),
-      );
+      await integrationService.getUserIntegrations(user.id);
     } catch (dbError: any) {
       console.error("❌ Failed to persist to database:", dbError);
       console.error("Error details:", {
