@@ -8,6 +8,13 @@
       "when": 1769224835284,
       "tag": "0000_ambiguous_colossus",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1769326084058,
+      "tag": "0001_keen_celestials",
+      "breakpoints": true
     }
   ]
 }

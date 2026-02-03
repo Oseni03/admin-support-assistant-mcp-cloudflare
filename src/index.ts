@@ -17,14 +17,14 @@ import { driveTools } from "./tools/google-drive";
 import { Props } from "./utils";
 import { createDbClient, DbClient } from "./db/client";
 import { IntegrationService } from "./services/integrations";
-import { BillingService } from "./services/billing";
 import { eq } from "drizzle-orm";
 import * as schema from "./db/schema";
+import { billingHandler } from "./routes/billing-handler";
+import { checkToolAccess } from "./middleware/access";
 
 export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
   private db!: DbClient;
   private integrations!: IntegrationService;
-  private billing!: BillingService;
 
   server = new McpServer({
     name: "Admin Assistant MCP with Google, Gmail, Calendar, Drive, Notion & Slack Integrations",
@@ -35,7 +35,6 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
     // Initialize services
     this.db = createDbClient(this.env.DB); // D1 database binding
     this.integrations = new IntegrationService(this.db);
-    this.billing = new BillingService(this.db);
 
     // Register the integrations resource
     this.server.registerResource(
@@ -304,6 +303,26 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
           inputSchema: toolDef.schema.shape ?? {},
         },
         async (args: z.infer<typeof toolDef.schema>) => {
+          const userEmail = this.props?.email;
+          if (!userEmail) {
+            return {
+              content: [{ type: "text", text: "Not authenticated" }],
+            };
+          }
+
+          // Check tool access based on plan
+          const accessCheck = await checkToolAccess(this.env, userEmail, toolName);
+          if (!accessCheck.allowed) {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: accessCheck.message || "Access denied",
+                },
+              ],
+            };
+          }
+
           const [ctx, authError] = await this.getGmailContext();
           if (!ctx) return authError;
 
@@ -329,6 +348,26 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
           inputSchema: toolDef.schema.shape ?? {},
         },
         async (args: z.infer<typeof toolDef.schema>) => {
+          const userEmail = this.props?.email;
+          if (!userEmail) {
+            return {
+              content: [{ type: "text", text: "Not authenticated" }],
+            };
+          }
+
+          // Check tool access based on plan
+          const accessCheck = await checkToolAccess(this.env, userEmail, toolName);
+          if (!accessCheck.allowed) {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: accessCheck.message || "Access denied",
+                },
+              ],
+            };
+          }
+
           const [ctx, authError] = await this.getCalendarContext();
           if (!ctx) return authError;
 
@@ -353,6 +392,26 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
           inputSchema: toolDef.schema.shape ?? {},
         },
         async (args: z.infer<typeof toolDef.schema>) => {
+          const userEmail = this.props?.email;
+          if (!userEmail) {
+            return {
+              content: [{ type: "text", text: "Not authenticated" }],
+            };
+          }
+
+          // Check tool access based on plan
+          const accessCheck = await checkToolAccess(this.env, userEmail, toolName);
+          if (!accessCheck.allowed) {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: accessCheck.message || "Access denied",
+                },
+              ],
+            };
+          }
+
           const [ctx, authError] = await this.getDriveContext();
           if (!ctx) return authError;
 
@@ -680,6 +739,7 @@ export default new OAuthProvider({
   apiHandlers: {
     "/sse": MyMCP.serveSSE("/sse"),
     "/mcp": MyMCP.serve("/mcp"),
+    "/billing": billingHandler as any,
   },
   authorizeEndpoint: "/authorize",
   clientRegistrationEndpoint: "/register",
