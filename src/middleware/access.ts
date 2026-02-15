@@ -5,8 +5,58 @@ import { IntegrationService } from "../services/integrations";
 import { eq } from "drizzle-orm";
 import * as schema from "../db/schema";
 
+export async function checkAccess(
+  env: Env,
+  userEmail: string,
+): Promise<{ allowed: boolean; message?: string; status?: string; daysRemaining?: number }> {
+  try {
+    const db = createDbClient(env.DB);
+    const user = await db.query.user.findFirst({
+      where: eq(schema.user.email, userEmail),
+    });
+
+    if (!user) {
+      return { allowed: false, message: "User not found" };
+    }
+
+    const polar = createPolarClient(env);
+    const billingService = new BillingService(db, polar);
+
+    const access = await billingService.hasActiveAccess(user.id);
+
+    if (!access.hasAccess) {
+      const upgradeUrl = `${env.SERVER_URL}/billing/checkout?plan=${user.plan}`;
+
+      return {
+        allowed: false,
+        status: access.status,
+        message: `${access.reason}\n\nStart your subscription: ${upgradeUrl}`,
+      };
+    }
+
+    return {
+      allowed: true,
+      status: access.status,
+      daysRemaining: access.daysRemaining,
+    };
+  } catch (error: any) {
+    console.error("Error checking access:", error);
+    // Fail closed for security
+    return {
+      allowed: false,
+      message: "Unable to verify subscription status. Please try again.",
+    };
+  }
+}
+
 export async function checkToolAccess(env: Env, userEmail: string, toolName: string): Promise<{ allowed: boolean; message?: string }> {
   try {
+    // First check if user has any access at all
+    const baseAccess = await checkAccess(env, userEmail);
+    if (!baseAccess.allowed) {
+      return baseAccess;
+    }
+
     const db = createDbClient(env.DB);
     const user = await db.query.user.findFirst({
       where: eq(schema.user.email, userEmail),
@@ -23,28 +73,20 @@ export async function checkToolAccess(env: Env, userEmail: string, toolName: str
     const canUse = billingService.canUseTool(currentPlan, toolName);
 
     if (!canUse) {
-      // Determine required plan
-      let requiredPlan: "pro" | "enterprise" = "pro";
-
-      // Check if it's an enterprise-only tool
-      const enterpriseTools = ["batch_modify_emails", "batch_delete_emails"];
-      const notionSlackTools = toolName.startsWith("notion_") || toolName.startsWith("slack_");
-
-      if (enterpriseTools.includes(toolName) || notionSlackTools) {
-        requiredPlan = "enterprise";
-      }
-
-      const upgradeUrl = `${env.SERVER_URL}/billing/checkout?email=${encodeURIComponent(userEmail)}&plan=${requiredPlan}`;
-      const upgradeMessage = `This tool requires the ${requiredPlan.toUpperCase()} plan.\n\nUpgrade at: ${upgradeUrl}`;
-
-      return { allowed: false, message: upgradeMessage };
+      const upgradeUrl = `${env.SERVER_URL}/billing/checkout?plan=enterprise`;
+      return {
+        allowed: false,
+        message: `This tool requires Enterprise plan.\n\nUpgrade: ${upgradeUrl}`,
+      };
     }
 
     return { allowed: true };
   } catch (error: any) {
     console.error("Error checking tool access:", error);
-    // Fail open in case of errors
-    return { allowed: true };
+    return {
+      allowed: false,
+      message: "Unable to verify tool access. Please try again.",
+    };
   }
 }
 
@@ -54,6 +96,12 @@ export async function checkIntegrationAccess(
   provider: string,
 ): Promise<{ allowed: boolean; message?: string }> {
   try {
+    // First check if user has any access at all
+    const baseAccess = await checkAccess(env, userEmail);
+    if (!baseAccess.allowed) {
+      return baseAccess;
+    }
+
     const db = createDbClient(env.DB);
     const user = await db.query.user.findFirst({
       where: eq(schema.user.email, userEmail),
@@ -74,17 +122,20 @@ export async function checkIntegrationAccess(
 
     if (!check.allowed) {
       const requiredPlan = provider === "notion" || provider === "slack" ? "enterprise" : "pro";
-      const upgradeUrl = `${env.SERVER_URL}/billing/checkout?email=${encodeURIComponent(userEmail)}&plan=${requiredPlan}`;
+      const upgradeUrl = `${env.SERVER_URL}/billing/checkout?plan=${requiredPlan}`;
 
       return {
         allowed: false,
-        message: `${check.reason}\n\nUpgrade at: ${upgradeUrl}`,
+        message: `${check.reason}\n\nUpgrade: ${upgradeUrl}`,
       };
     }
 
     return { allowed: true };
   } catch (error: any) {
     console.error("Error checking integration access:", error);
-    return { allowed: true }; // Fail open
+    return {
+      allowed: false,
+      message: "Unable to verify integration access. Please try again.",
+    };
   }
 }

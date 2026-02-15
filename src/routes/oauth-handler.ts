@@ -17,7 +17,7 @@ import { createDbClient, type DbClient } from "../db/client";
 import { IntegrationService } from "../services/integrations";
 import { eq } from "drizzle-orm";
 import * as schema from "../db/schema";
-import { checkIntegrationAccess } from "../middleware/access";
+import { checkAccess, checkIntegrationAccess } from "../middleware/access";
 
 const app = new Hono<{ Bindings: Env & { OAUTH_PROVIDER: OAuthHelpers } }>();
 
@@ -30,6 +30,37 @@ async function handleDirectProviderAuth(c: any, provider: string) {
   let existingProps: Props | null = null;
 
   if (googleEmail) {
+    // Check subscription access BEFORE proceeding with auth
+    const accessCheck = await checkAccess(c.env, googleEmail);
+    if (!accessCheck.allowed) {
+      // Show upgrade page instead of auth
+      return c.html(`
+        <!DOCTYPE html>
+        <html>
+          <head>
+            <title>Subscription Required</title>
+            <style>
+              body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; background: #f9fafb; }
+              .card { background: white; padding: 3rem; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); text-align: center; max-width: 500px; }
+              h1 { color: #ef4444; margin-bottom: 1rem; font-size: 28px; }
+              .status { display: inline-block; padding: 8px 16px; background: #fee2e2; color: #991b1b; border-radius: 6px; margin-bottom: 1rem; font-weight: 600; }
+              p { color: #6b7280; margin-bottom: 1.5rem; line-height: 1.6; white-space: pre-line; }
+              a { display: inline-block; padding: 12px 24px; background: #0070f3; color: white; text-decoration: none; border-radius: 6px; font-weight: 600; margin-top: 0.5rem; }
+              a:hover { background: #0051cc; }
+            </style>
+          </head>
+          <body>
+            <div class="card">
+              <h1>🔒 Subscription Required</h1>
+              <div class="status">Status: ${accessCheck.status?.toUpperCase()}</div>
+              <p>${accessCheck.message}</p>
+              <a href="${c.env.SERVER_URL}/billing/checkout">View Plans & Subscribe</a>
+            </div>
+          </body>
+        </html>
+      `);
+    }
+
     try {
       // Check if D1 binding exists
       if (!c.env.DB) {
@@ -116,7 +147,7 @@ async function handleDirectProviderAuth(c: any, provider: string) {
     console.error("User must have authenticated with Google first");
   }
 
-  // Check integration access before proceeding with OAuth
+  // Check integration access before proceeding with OAuth (for non-Google providers)
   if (googleEmail && provider !== "google") {
     const integrationCheck = await checkIntegrationAccess(c.env, googleEmail, provider);
 
@@ -140,7 +171,7 @@ async function handleDirectProviderAuth(c: any, provider: string) {
             <div class="card">
               <h1>Upgrade Required</h1>
               <p>${integrationCheck.message}</p>
-              <a href="${c.env.SERVER_URL}/billing/checkout?email=${googleEmail}">Upgrade Now</a>
+              <a href="${c.env.SERVER_URL}/billing/checkout">Upgrade Now</a>
             </div>
           </body>
         </html>
@@ -499,7 +530,7 @@ app.get("/callback/:provider", async (c) => {
       };
 
       // ============================================================
-      // CRITICAL: Create user immediately upon Google authentication
+      // CRITICAL: Create user with 7-day trial on first Google auth
       // ============================================================
       try {
         const db = createDbClient(c.env.DB);
@@ -511,6 +542,9 @@ app.get("/callback/:provider", async (c) => {
 
         if (!user) {
           const userId = crypto.randomUUID();
+          const now = new Date();
+          const trialEnd = new Date();
+          trialEnd.setDate(trialEnd.getDate() + 7); // 7-day trial
 
           await db.insert(schema.user).values({
             id: userId,
@@ -518,9 +552,15 @@ app.get("/callback/:provider", async (c) => {
             name: userData.name,
             emailVerified: true, // Google has already verified the email
             image: userInfo.picture || null,
-            createdAt: new Date(),
-            updatedAt: new Date(),
+            plan: "pro", // Default to pro plan
+            subscriptionStatus: "trial",
+            trialStartDate: now,
+            trialEndDate: trialEnd,
+            createdAt: now,
+            updatedAt: now,
           });
+
+          console.log("✅ Created new user with 7-day trial:", userData.email);
 
           // Fetch the newly created user
           user = await db.query.user.findFirst({
@@ -539,7 +579,7 @@ app.get("/callback/:provider", async (c) => {
             .where(eq(schema.user.id, user.id));
         }
 
-        // Save Google integration immediately
+        // Save Google integration
         if (user) {
           const integrationService = new IntegrationService(db);
 
@@ -643,7 +683,6 @@ app.get("/callback/:provider", async (c) => {
   userData = resolveGoogleIdentity(userData, existingProps);
 
   // Persist to database (for non-Google providers)
-  // Google provider already saved the user and integration above
   if (userData.email && userData.email !== "unknown-user@example.com" && provider !== "google") {
     try {
       const db = createDbClient(c.env.DB);
@@ -659,13 +698,21 @@ app.get("/callback/:provider", async (c) => {
         console.warn("Creating user as fallback...");
 
         const userId = crypto.randomUUID();
+        const now = new Date();
+        const trialEnd = new Date();
+        trialEnd.setDate(trialEnd.getDate() + 7);
+
         await db.insert(schema.user).values({
           id: userId,
           email: userData.email,
           name: userData.name,
           emailVerified: false,
-          createdAt: new Date(),
-          updatedAt: new Date(),
+          plan: "pro",
+          subscriptionStatus: "trial",
+          trialStartDate: now,
+          trialEndDate: trialEnd,
+          createdAt: now,
+          updatedAt: now,
         });
 
         user = await db.query.user.findFirst({
@@ -685,25 +732,13 @@ app.get("/callback/:provider", async (c) => {
           provider: provider,
           accessToken: currentProvider.accessToken,
           refreshToken: currentProvider.refreshToken,
-          scope: undefined, // Provider-specific scope if needed
+          scope: undefined,
         });
       }
-
-      // Verify save
-      await integrationService.getUserIntegrations(user.id);
     } catch (dbError: any) {
       console.error("❌ Failed to persist to database:", dbError);
-      console.error("Error details:", {
-        message: dbError.message,
-        stack: dbError.stack,
-        name: dbError.name,
-      });
-      // Don't fail the auth flow, but log the error
+      // Don't fail the auth flow
     }
-  } else if (provider === "google") {
-    console.log("ℹ️ Google provider - user already created and saved above");
-  } else {
-    console.error("❌ Cannot save to database - invalid user email:", userData.email);
   }
 
   return completeAuthorization(c, {
@@ -790,7 +825,7 @@ async function completeAuthorization(
         </head>
         <body>
           <div class="card">
-            <h1>Authorization Successful</h1>
+            <h1>✓ Authorization Successful</h1>
             <p>You have successfully connected <strong>${connectedIntegrations.join(", ")}</strong>.</p>
             <p>You can now return to the application to continue.</p>
           </div>

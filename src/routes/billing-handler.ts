@@ -104,113 +104,87 @@ billing.post("/checkout", async (c) => {
 
 // Checkout page with plan selection
 billing.get("/checkout", async (c) => {
-  const plan = c.req.query("plan") || "pro";
-  const email = c.req.query("email");
+  try {
+    const plan = c.req.query("plan") as "pro" | "enterprise" | undefined;
 
-  return c.html(`
-    <!DOCTYPE html>
-    <html>
-      <head>
-        <title>Upgrade Your Plan</title>
-        <style>
-          * { margin: 0; padding: 0; box-sizing: border-box; }
-          body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f9fafb; padding: 40px 20px; }
-          .container { max-width: 1000px; margin: 0 auto; }
-          h1 { text-align: center; margin-bottom: 40px; color: #111827; }
-          .plans { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 24px; margin-bottom: 40px; }
-          .plan-card { background: white; padding: 32px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); border: 2px solid transparent; }
-          .plan-card.recommended { border-color: #0070f3; position: relative; }
-          .plan-card.recommended::before { content: "RECOMMENDED"; position: absolute; top: -12px; left: 50%; transform: translateX(-50%); background: #0070f3; color: white; padding: 4px 12px; border-radius: 4px; font-size: 12px; font-weight: 600; }
-          .plan-name { font-size: 24px; font-weight: 700; margin-bottom: 8px; color: #111827; }
-          .plan-price { font-size: 36px; font-weight: 700; color: #0070f3; margin-bottom: 8px; }
-          .plan-price span { font-size: 16px; color: #6b7280; }
-          .features { list-style: none; margin: 24px 0; }
-          .features li { padding: 8px 0; color: #374151; display: flex; align-items: center; }
-          .features li::before { content: "✓"; color: #10b981; font-weight: 700; margin-right: 8px; }
-          .cta-button { width: 100%; padding: 16px; background: #0070f3; color: white; border: none; border-radius: 8px; font-size: 16px; font-weight: 600; cursor: pointer; }
-          .cta-button:hover { background: #0051cc; }
-          .current { background: #e5e7eb; cursor: not-allowed; }
-        </style>
-      </head>
-      <body>
-        <div class="container">
-          <h1>Choose Your Plan</h1>
-          <div class="plans">
-            <div class="plan-card">
-              <div class="plan-name">Free</div>
-              <div class="plan-price">$0<span>/month</span></div>
-              <ul class="features">
-                <li>Read-only access</li>
-                <li>1 integration</li>
-                <li>Gmail, Calendar, Drive</li>
-                <li>Basic tools only</li>
-              </ul>
-              <button class="cta-button current" disabled>Current Plan</button>
+    if (!plan || (plan !== "pro" && plan !== "enterprise")) {
+      return c.html(`
+        <!DOCTYPE html>
+        <html>
+          <head>
+            <title>Choose Plan</title>
+            <style>
+              body { font-family: system-ui; max-width: 800px; margin: 40px auto; padding: 20px; }
+              .plans { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+              .plan { border: 2px solid #e5e7eb; border-radius: 12px; padding: 24px; }
+              .plan.featured { border-color: #0070f3; }
+              h1 { text-align: center; }
+              .price { font-size: 48px; font-weight: bold; margin: 16px 0; }
+              .features { list-style: none; padding: 0; }
+              .features li { padding: 8px 0; }
+              .features li:before { content: "✓ "; color: #0070f3; font-weight: bold; }
+              .cta { background: #0070f3; color: white; border: none; padding: 12px 24px; border-radius: 6px; cursor: pointer; width: 100%; font-size: 16px; }
+              .cta:hover { background: #0051cc; }
+            </style>
+          </head>
+          <body>
+            <h1>Choose Your Plan</h1>
+            <p style="text-align: center; color: #666;">7-day free trial • No credit card required</p>
+            <div class="plans">
+              <div class="plan">
+                <h2>Pro</h2>
+                <div class="price">$${PLANS.pro.price}<span style="font-size: 18px; color: #666;">/mo</span></div>
+                <ul class="features">
+                  <li>Up to 3 integrations</li>
+                  <li>Gmail, Calendar, Drive</li>
+                  <li>Full read/write access</li>
+                  <li>Email support</li>
+                </ul>
+                <button class="cta" onclick="window.location.href='/billing/checkout?plan=pro'">Start Trial</button>
+              </div>
+              <div class="plan featured">
+                <h2>Enterprise ⭐</h2>
+                <div class="price">$${PLANS.enterprise.price}<span style="font-size: 18px; color: #666;">/mo</span></div>
+                <ul class="features">
+                  <li>Unlimited integrations</li>
+                  <li>All Pro features</li>
+                  <li>Notion & Slack</li>
+                  <li>Batch operations</li>
+                  <li>Priority support</li>
+                </ul>
+                <button class="cta" onclick="window.location.href='/billing/checkout?plan=enterprise'">Start Trial</button>
+              </div>
             </div>
+          </body>
+        </html>
+      `);
+    }
 
-            <div class="plan-card ${plan === "pro" ? "recommended" : ""}">
-              <div class="plan-name">Pro</div>
-              <div class="plan-price">$10<span>/month</span></div>
-              <ul class="features">
-                <li>Full read & write access</li>
-                <li>Up to 3 integrations</li>
-                <li>Gmail, Calendar, Drive</li>
-                <li>All basic tools</li>
-                <li>Email sending & management</li>
-                <li>File uploads</li>
-              </ul>
-              <button class="cta-button" onclick="selectPlan('pro', '${email}')">
-                Upgrade to Pro
-              </button>
-            </div>
+    // Get user from session/auth
+    const userEmail = c.req.query("email"); // In production, get from authenticated session
+    if (!userEmail) {
+      return c.text("Unauthorized", 401);
+    }
 
-            <div class="plan-card ${plan === "enterprise" ? "recommended" : ""}">
-              <div class="plan-name">Enterprise</div>
-              <div class="plan-price">$30<span>/month</span></div>
-              <ul class="features">
-                <li>Everything in Pro</li>
-                <li>Unlimited integrations</li>
-                <li>All providers (Notion, Slack)</li>
-                <li>Advanced batch operations</li>
-                <li>Priority support</li>
-                <li>API access</li>
-              </ul>
-              <button class="cta-button" onclick="selectPlan('enterprise', '${email}')">
-                Upgrade to Enterprise
-              </button>
-            </div>
-          </div>
-        </div>
+    const db = createDbClient(c.env.DB);
+    const user = await db.query.user.findFirst({
+      where: eq(schema.user.email, userEmail),
+    });
 
-        <script>
-          async function selectPlan(planName, email) {
-            if (!email) {
-              email = prompt('Please enter your email:');
-              if (!email) return;
-            }
+    if (!user) {
+      return c.text("User not found", 404);
+    }
 
-            try {
-              const response = await fetch('/billing/checkout', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ email, plan: planName })
-              });
+    const polar = createPolarClient(c.env);
+    const billingService = new BillingService(db, polar);
 
-              const data = await response.json();
-              
-              if (data.checkoutUrl) {
-                window.location.href = data.checkoutUrl;
-              } else {
-                alert('Error: ' + (data.error || 'Failed to create checkout'));
-              }
-            } catch (error) {
-              alert('Error creating checkout: ' + error.message);
-            }
-          }
-        </script>
-      </body>
-    </html>
-  `);
+    const checkoutUrl = await billingService.createCheckoutUrl(user.id, userEmail, plan, `${c.env.SERVER_URL}/billing/success`);
+
+    return c.redirect(checkoutUrl);
+  } catch (error: any) {
+    console.error("Error creating checkout:", error);
+    return c.text(`Error: ${error.message}`, 500);
+  }
 });
 
 // Success page
@@ -268,7 +242,7 @@ billing.post("/cancel", async (c) => {
     const polar = createPolarClient(c.env);
     const billingService = new BillingService(db, polar);
 
-    await billingService.cancelSubscription(user.id);
+    await billingService.updateSubscriptionStatus(user.id, "cancelled");
 
     return c.json({
       message: "Subscription canceled. You'll be downgraded to Free plan at the end of your billing period.",
@@ -307,12 +281,7 @@ billing.post("/webhook", async (c) => {
           const subscriptionId = event.data.subscriptionId;
 
           if (userId && plan && customerId && subscriptionId) {
-            await billingService.activateSubscription({
-              userId: userId as string,
-              plan: plan as "pro" | "enterprise",
-              polarCustomerId: customerId,
-              polarSubscriptionId: subscriptionId,
-            });
+            await billingService.activateSubscription(userId as string, plan as "pro" | "enterprise", customerId, subscriptionId);
 
             console.log(`✅ Activated ${plan} for user ${userId}`);
           }
@@ -328,13 +297,12 @@ billing.post("/webhook", async (c) => {
           await db
             .update(schema.user)
             .set({
-              plan: "free",
-              subscriptionStatus: "canceled",
+              subscriptionStatus: "cancelled",
               updatedAt: new Date(),
             })
             .where(eq(schema.user.id, sub.id));
 
-          console.log(`✅ Downgraded user ${sub.id} to free`);
+          console.log(`✅ Downgraded user ${sub.id} to cancelled`);
         }
         break;
     }

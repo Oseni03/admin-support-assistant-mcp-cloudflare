@@ -20,7 +20,6 @@ import { IntegrationService } from "./services/integrations";
 import { eq } from "drizzle-orm";
 import * as schema from "./db/schema";
 import { billingHandler } from "./routes/billing-handler";
-import { checkToolAccess } from "./middleware/access";
 import { Client } from "@notionhq/client";
 
 export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
@@ -34,7 +33,7 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
 
   async init() {
     // Initialize services
-    this.db = createDbClient(this.env.DB); // D1 database binding
+    this.db = createDbClient(this.env.DB);
     this.integrations = new IntegrationService(this.db);
 
     // Register the integrations resource
@@ -82,35 +81,34 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
           },
         };
 
-        // Load from KV for non-Google-base integrations
+        // Load from database
         if (userEmail) {
-          const key = `user-providers::${userEmail}`;
-          const stored = await this.env.PROVIDERS_KV.get(key);
-          if (stored) {
-            const data = JSON.parse(stored);
-            integrations = {
-              ...integrations,
-              gmail: {
-                ...integrations.gmail,
-                connected: !!data.providers?.gmail?.accessToken,
-              },
-              calendar: {
-                ...integrations.calendar,
-                connected: !!data.providers?.calendar?.accessToken,
-              },
-              drive: {
-                ...integrations.drive,
-                connected: !!data.providers?.drive?.accessToken,
-              },
-              notion: {
-                ...integrations.notion,
-                connected: !!data.providers?.notion?.accessToken,
-              },
-              slack: {
-                ...integrations.slack,
-                connected: !!data.providers?.slack?.accessToken,
-              },
-            };
+          try {
+            const user = await this.db.query.user.findFirst({
+              where: eq(schema.user.email, userEmail),
+            });
+
+            if (user) {
+              const userIntegrations = await this.integrations.getUserIntegrations(user.id);
+
+              for (const integration of userIntegrations) {
+                if (integration.provider === "google") {
+                  integrations.google.connected = true;
+                } else if (integration.provider === "gmail") {
+                  integrations.gmail.connected = true;
+                } else if (integration.provider === "calendar") {
+                  integrations.calendar.connected = true;
+                } else if (integration.provider === "drive") {
+                  integrations.drive.connected = true;
+                } else if (integration.provider === "notion") {
+                  integrations.notion.connected = true;
+                } else if (integration.provider === "slack") {
+                  integrations.slack.connected = true;
+                }
+              }
+            }
+          } catch (error: any) {
+            console.error("Error loading integrations:", error);
           }
         }
 
@@ -226,6 +224,13 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
         inputSchema: z.object({}).strict(),
       },
       async () => {
+        const userEmail = this.props?.email;
+        if (!userEmail) {
+          return {
+            content: [{ type: "text", text: "Not authenticated" }],
+          };
+        }
+
         return {
           content: [
             {
@@ -266,6 +271,13 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
         annotations: { readOnlyHint: true, idempotentHint: true },
       },
       async () => {
+        const userEmail = this.props?.email;
+        if (!userEmail) {
+          return {
+            content: [{ type: "text", text: "Not authenticated" }],
+          };
+        }
+
         if (!this.props?.accessToken) {
           return this.authorizationRequired("google", "Google integration is required", "userInfoGoogle");
         }
@@ -311,19 +323,6 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
             };
           }
 
-          // Check tool access based on plan
-          const accessCheck = await checkToolAccess(this.env, userEmail, toolName);
-          if (!accessCheck.allowed) {
-            return {
-              content: [
-                {
-                  type: "text",
-                  text: accessCheck.message || "Access denied",
-                },
-              ],
-            };
-          }
-
           const [ctx, authError] = await this.getGmailContext();
           if (!ctx) return authError;
 
@@ -353,19 +352,6 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
           if (!userEmail) {
             return {
               content: [{ type: "text", text: "Not authenticated" }],
-            };
-          }
-
-          // Check tool access based on plan
-          const accessCheck = await checkToolAccess(this.env, userEmail, toolName);
-          if (!accessCheck.allowed) {
-            return {
-              content: [
-                {
-                  type: "text",
-                  text: accessCheck.message || "Access denied",
-                },
-              ],
             };
           }
 
@@ -400,19 +386,6 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
             };
           }
 
-          // Check tool access based on plan
-          const accessCheck = await checkToolAccess(this.env, userEmail, toolName);
-          if (!accessCheck.allowed) {
-            return {
-              content: [
-                {
-                  type: "text",
-                  text: accessCheck.message || "Access denied",
-                },
-              ],
-            };
-          }
-
           const [ctx, authError] = await this.getDriveContext();
           if (!ctx) return authError;
 
@@ -438,6 +411,13 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
           inputSchema: operation.inputSchema,
         },
         async (args: any) => {
+          const userEmail = this.props?.email;
+          if (!userEmail) {
+            return {
+              content: [{ type: "text", text: "Not authenticated" }],
+            };
+          }
+
           const [ctx, authError] = await this.getNotionContext();
           if (!ctx) return authError;
 
@@ -467,6 +447,13 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
           inputSchema: toolDef.schema.shape ?? {},
         },
         async (args: z.infer<typeof toolDef.schema>) => {
+          const userEmail = this.props?.email;
+          if (!userEmail) {
+            return {
+              content: [{ type: "text", text: "Not authenticated" }],
+            };
+          }
+
           const [ctx, authError] = await this.getSlackContext();
           if (!ctx) return authError;
 
@@ -525,8 +512,7 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
     };
   }
 
-  // Fixed context getters that check KV FIRST, then fall back to props
-
+  // Context getters remain the same
   private async getGmailContext(): Promise<[any, null] | [null, any]> {
     const userEmail = this.props?.email;
     if (!userEmail) {
@@ -534,13 +520,11 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
     }
 
     try {
-      // Check if DB binding exists
       if (!this.env.DB) {
         console.error("D1 Database binding 'DB' not found in environment");
         return [null, this.authorizationRequired("gmail", "Database not configured.")];
       }
 
-      // Get user from database
       const user = await this.db.query.user.findFirst({
         where: eq(schema.user.email, userEmail),
       });
@@ -550,7 +534,6 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
         return [null, this.authorizationRequired("gmail", "User not found. Please authenticate with Google first.")];
       }
 
-      // Get integration from database
       const gmailIntegration = await this.integrations.getIntegration(user.id, "gmail");
 
       if (!gmailIntegration?.accessToken) {

@@ -1,6 +1,5 @@
 import { sqliteTable, text, integer, primaryKey, uniqueIndex } from "drizzle-orm/sqlite-core";
 
-// BetterAuth required tables
 export const user = sqliteTable("user", {
   id: text("id").primaryKey(),
   name: text("name").notNull(),
@@ -8,17 +7,24 @@ export const user = sqliteTable("user", {
   emailVerified: integer("emailVerified", { mode: "boolean" }).notNull(),
   image: text("image"),
 
-  // Subscription tier
-  plan: text("plan").notNull().default("free"), // 'free', 'pro', 'enterprise'
-  polarCustomerId: text("polarCustomerId"),
-  polarSubscriptionId: text("polarSubscriptionId"),
+  // Subscription fields
+  plan: text("plan", { enum: ["pro", "enterprise"] }).default("pro"),
+  subscriptionStatus: text("subscription_status", {
+    enum: ["trial", "active", "expired", "cancelled"],
+  }).default("trial"),
 
-  // Subscription status
-  subscriptionStatus: text("subscriptionStatus").default("active"), // 'active', 'canceled', 'past_due'
-  subscriptionEndsAt: integer("subscriptionEndsAt", { mode: "timestamp" }),
+  // Trial tracking
+  trialStartDate: integer("trial_start_date", { mode: "timestamp" }).notNull(),
+  trialEndDate: integer("trial_end_date", { mode: "timestamp" }).notNull(),
 
-  createdAt: integer("createdAt", { mode: "timestamp" }).notNull(),
-  updatedAt: integer("updatedAt", { mode: "timestamp" }).notNull(),
+  // Subscription tracking
+  polarSubscriptionId: text("polar_subscription_id"),
+  polarCustomerId: text("polar_customer_id"),
+  subscriptionStartDate: integer("subscription_start_date", { mode: "timestamp" }),
+  subscriptionEndDate: integer("subscription_end_date", { mode: "timestamp" }),
+
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
+  updatedAt: integer("updated_at", { mode: "timestamp" }).notNull(),
 });
 
 export const session = sqliteTable("session", {
@@ -61,23 +67,21 @@ export const verification = sqliteTable("verification", {
   updatedAt: integer("updatedAt", { mode: "timestamp" }),
 });
 
-// Custom tables for your application
 export const integration = sqliteTable("integration", {
   id: text("id").primaryKey(),
-  userId: text("userId")
+  userId: text("user_id")
     .notNull()
     .references(() => user.id, { onDelete: "cascade" }),
-  provider: text("provider").notNull(), // 'gmail', 'calendar', 'drive', 'notion', 'slack'
-  accessToken: text("accessToken").notNull(),
-  refreshToken: text("refreshToken"),
-  expiresAt: integer("expiresAt", { mode: "timestamp" }),
+  provider: text("provider", {
+    enum: ["google", "gmail", "calendar", "drive", "notion", "slack"],
+  }).notNull(),
+
+  accessToken: text("access_token").notNull(),
+  refreshToken: text("refresh_token"),
+  expiresAt: integer("expires_at", { mode: "timestamp" }),
   scope: text("scope"),
   metadata: text("metadata"), // JSON string for provider-specific data
-  createdAt: integer("createdAt", { mode: "timestamp" }).notNull(),
-  updatedAt: integer("updatedAt", { mode: "timestamp" }).notNull(),
-});
 
-// Composite unique constraint
-export const integrationIndex = primaryKey({
-  columns: [integration.userId, integration.provider],
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
+  updatedAt: integer("updated_at", { mode: "timestamp" }).notNull(),
 });

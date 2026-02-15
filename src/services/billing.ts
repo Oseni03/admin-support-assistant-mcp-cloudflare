@@ -1,28 +1,96 @@
+import { DrizzleD1Database } from "drizzle-orm/d1";
 import { eq } from "drizzle-orm";
-import { DbClient } from "../db/client";
-import { user } from "../db/schema";
+import * as schema from "../db/schema";
 import { Polar } from "@polar-sh/sdk";
-import { PLANS, PlanTier } from "../lib/plans";
+import { PLANS, PlanTier, getTrialStatus } from "../lib/plans";
 
 export class BillingService {
   constructor(
-    private db: DbClient,
+    private db: DrizzleD1Database<typeof schema>,
     private polar: Polar,
   ) {}
 
-  // Get user's current plan
-  async getUserPlan(userId: string): Promise<PlanTier> {
-    const result = await this.db.select().from(user).where(eq(user.id, userId)).limit(1);
+  /**
+   * Check if user has active access (trial or paid)
+   */
+  async hasActiveAccess(userId: string): Promise<{
+    hasAccess: boolean;
+    status: "trial" | "active" | "expired" | "cancelled";
+    daysRemaining?: number;
+    reason?: string;
+  }> {
+    const user = await this.db.query.user.findFirst({
+      where: eq(schema.user.id, userId),
+    });
 
-    if (!result[0]) return "free";
-    return (result[0].plan || "free") as PlanTier;
+    if (!user) {
+      return { hasAccess: false, status: "expired", reason: "User not found" };
+    }
+
+    // Check if they have an active paid subscription
+    if (user.subscriptionStatus === "active") {
+      const now = new Date();
+      const endDate = user.subscriptionEndDate ? new Date(user.subscriptionEndDate) : null;
+
+      if (endDate && now < endDate) {
+        return { hasAccess: true, status: "active" };
+      }
+
+      // Subscription expired
+      await this.updateSubscriptionStatus(userId, "expired");
+      return {
+        hasAccess: false,
+        status: "expired",
+        reason: "Subscription expired",
+      };
+    }
+
+    // Check trial status
+    if (user.subscriptionStatus === "trial") {
+      const trial = getTrialStatus(user.trialStartDate);
+
+      if (trial.isActive) {
+        return {
+          hasAccess: true,
+          status: "trial",
+          daysRemaining: trial.daysRemaining,
+        };
+      }
+
+      // Trial expired
+      await this.updateSubscriptionStatus(userId, "expired");
+      return {
+        hasAccess: false,
+        status: "expired",
+        reason: "Trial expired",
+      };
+    }
+
+    // Expired or cancelled
+    return {
+      hasAccess: false,
+      status: user.subscriptionStatus,
+      reason: `Subscription ${user.subscriptionStatus}`,
+    };
   }
 
-  // Check if user can use a specific tool
+  /**
+   * Get user's current plan
+   */
+  async getUserPlan(userId: string): Promise<PlanTier> {
+    const user = await this.db.query.user.findFirst({
+      where: eq(schema.user.id, userId),
+    });
+
+    return (user?.plan as PlanTier) || "pro";
+  }
+
+  /**
+   * Check if user can use a specific tool
+   */
   canUseTool(plan: PlanTier, toolName: string): boolean {
     const planConfig = PLANS[plan];
 
-    // Enterprise has access to all tools
     if (planConfig.allowedTools === "*") {
       return true;
     }
@@ -30,15 +98,10 @@ export class BillingService {
     return planConfig.allowedTools.includes(toolName as any);
   }
 
-  // Check if user can connect a provider
-  canConnectProvider(
-    plan: PlanTier,
-    provider: string,
-    currentIntegrationCount: number,
-  ): {
-    allowed: boolean;
-    reason?: string;
-  } {
+  /**
+   * Check if user can connect a provider
+   */
+  canConnectProvider(plan: PlanTier, provider: string, currentIntegrationCount: number): { allowed: boolean; reason?: string } {
     const planConfig = PLANS[plan];
 
     // Check provider is allowed for this tier
@@ -53,15 +116,17 @@ export class BillingService {
     if (currentIntegrationCount >= planConfig.features.maxIntegrations) {
       return {
         allowed: false,
-        reason: `You've reached the maximum of ${planConfig.features.maxIntegrations} integration(s) for ${plan} plan`,
+        reason: `You've reached the maximum of ${planConfig.features.maxIntegrations} integrations for ${plan} plan`,
       };
     }
 
     return { allowed: true };
   }
 
-  // Create checkout URL for upgrade
-  async createCheckoutUrl(userId: string, userEmail: string, targetPlan: "pro" | "enterprise", successUrl: string) {
+  /**
+   * Create checkout URL for subscription
+   */
+  async createCheckoutUrl(userId: string, userEmail: string, targetPlan: "pro" | "enterprise", successUrl: string): Promise<string> {
     const planConfig = PLANS[targetPlan];
 
     if (!planConfig.polarPriceId) {
@@ -79,64 +144,75 @@ export class BillingService {
         successUrl,
       });
 
-      return checkout.url;
+      return checkout.url!;
     } catch (error: any) {
       console.error("Error creating Polar checkout:", error);
       throw error;
     }
   }
 
-  // Activate paid subscription
-  async activateSubscription(params: { userId: string; plan: "pro" | "enterprise"; polarCustomerId: string; polarSubscriptionId: string }) {
+  /**
+   * Handle successful subscription (webhook)
+   */
+  async activateSubscription(
+    userId: string,
+    plan: "pro" | "enterprise",
+    polarSubscriptionId: string,
+    polarCustomerId: string,
+  ): Promise<void> {
+    const now = new Date();
+    const endDate = new Date();
+    endDate.setMonth(endDate.getMonth() + 1); // Monthly subscription
+
     await this.db
-      .update(user)
+      .update(schema.user)
       .set({
-        plan: params.plan,
-        polarCustomerId: params.polarCustomerId,
-        polarSubscriptionId: params.polarSubscriptionId,
+        plan,
         subscriptionStatus: "active",
-        updatedAt: new Date(),
+        polarSubscriptionId,
+        polarCustomerId,
+        subscriptionStartDate: now,
+        subscriptionEndDate: endDate,
+        updatedAt: now,
       })
-      .where(eq(user.id, params.userId));
-
-    console.log(`✅ Activated ${params.plan} subscription for user ${params.userId}`);
+      .where(eq(schema.user.id, userId));
   }
 
-  // Cancel subscription (revert to free)
-  async cancelSubscription(userId: string) {
-    const result = await this.db.select().from(user).where(eq(user.id, userId)).limit(1);
-
-    const currentUser = result[0];
-    if (!currentUser?.polarSubscriptionId) {
-      throw new Error("No active subscription found");
-    }
-
-    // Cancel in Polar
-    await this.polar.subscriptions.revoke({
-      id: currentUser.polarSubscriptionId,
-    });
-
-    // Update database
+  /**
+   * Update subscription status
+   */
+  async updateSubscriptionStatus(userId: string, status: "trial" | "active" | "expired" | "cancelled"): Promise<void> {
     await this.db
-      .update(user)
+      .update(schema.user)
       .set({
-        plan: "free",
-        subscriptionStatus: "canceled",
-        subscriptionEndsAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000), // Grace period
+        subscriptionStatus: status,
         updatedAt: new Date(),
       })
-      .where(eq(user.id, userId));
-
-    console.log(`✅ Canceled subscription for user ${userId}`);
+      .where(eq(schema.user.id, userId));
   }
 
-  // Get upgrade prompt message
-  getUpgradeMessage(currentPlan: PlanTier, requiredPlan: PlanTier, serverUrl: string): string {
-    if (requiredPlan === "pro") {
-      return `⚠️ This feature requires Pro plan ($10/month)\n\nUpgrade at: ${serverUrl}/billing/checkout?plan=pro`;
-    } else if (requiredPlan === "enterprise") {
-      return `⚠️ This feature requires Enterprise plan ($30/month)\n\nUpgrade at: ${serverUrl}/billing/checkout?plan=enterprise`;
+  /**
+   * Get upgrade message for user
+   */
+  getUpgradeMessage(
+    currentPlan: PlanTier,
+    requiredPlan: "pro" | "enterprise",
+    baseUrl: string,
+    userEmail: string,
+    status: "trial" | "active" | "expired" | "cancelled",
+  ): string {
+    const planName = PLANS[requiredPlan].name;
+    const price = PLANS[requiredPlan].price;
+    const upgradeUrl = `${baseUrl}/billing/checkout?plan=${requiredPlan}`;
+
+    if (status === "expired") {
+      return `Your trial has expired. Subscribe to ${planName} ($${price}/mo) to continue using this feature.\n\nUpgrade: ${upgradeUrl}`;
     }
-    return "Feature not available on your current plan";
+
+    if (status === "trial") {
+      return `This feature requires ${planName} plan. Subscribe now ($${price}/mo) or continue with your trial.\n\nUpgrade: ${upgradeUrl}`;
+    }
+
+    return `Upgrade to ${planName} ($${price}/mo) to use this feature.\n\nUpgrade: ${upgradeUrl}`;
   }
 }

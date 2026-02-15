@@ -1,41 +1,16 @@
 import { env } from "cloudflare:workers";
 
 export const PLANS = {
-  free: {
-    name: "Free",
-    price: 0,
-    features: {
-      maxIntegrations: 1,
-      readOnly: true, // Only read operations allowed
-      advancedTools: false, // No batch operations
-    },
-    allowedProviders: ["gmail", "calendar", "drive"], // Can only connect these
-    allowedTools: [
-      // Gmail - Read only
-      "read_email",
-      "search_emails",
-      "list_email_labels",
-
-      // Calendar - Read only
-      "list_events",
-      "list_calendars",
-
-      // Drive - Read only
-      "search_files",
-      "get_file",
-      "download_file",
-    ],
-  },
   pro: {
     name: "Pro",
-    price: 10,
+    price: 15,
     polarPriceId: env.POLAR_PRO_PLAN,
+    trialDays: 7,
     features: {
       maxIntegrations: 3,
-      readOnly: false, // Can write
-      advancedTools: false, // No batch operations yet
+      description: "Perfect for individuals and small teams",
     },
-    allowedProviders: ["gmail", "calendar", "drive"], // Same as free
+    allowedProviders: ["gmail", "calendar", "drive"],
     allowedTools: [
       // Gmail - Full access
       "send_email",
@@ -68,16 +43,32 @@ export const PLANS = {
   },
   enterprise: {
     name: "Enterprise",
-    price: 30,
+    price: 40,
     polarPriceId: env.POLAR_ENTERPRISE_PLAN,
+    trialDays: 7,
     features: {
       maxIntegrations: Infinity,
-      readOnly: false,
-      advancedTools: true, // Batch operations, automation
+      description: "Advanced integrations and batch operations",
     },
-    allowedProviders: ["gmail", "calendar", "drive", "notion", "slack"], // All providers
+    allowedProviders: ["gmail", "calendar", "drive", "notion", "slack"],
     allowedTools: "*", // All tools allowed
   },
 } as const;
 
 export type PlanTier = keyof typeof PLANS;
+
+// Trial status helper
+export function getTrialStatus(createdAt: Date, trialDays: number = 7) {
+  const now = new Date();
+  const trialEndDate = new Date(createdAt);
+  trialEndDate.setDate(trialEndDate.getDate() + trialDays);
+
+  const daysRemaining = Math.ceil((trialEndDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
+
+  return {
+    isActive: now < trialEndDate,
+    daysRemaining: Math.max(0, daysRemaining),
+    endDate: trialEndDate,
+    hasExpired: now >= trialEndDate,
+  };
+}
