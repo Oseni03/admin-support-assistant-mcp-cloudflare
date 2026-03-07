@@ -19,7 +19,6 @@ import { createDbClient, DbClient } from "./db/client";
 import { IntegrationService } from "./services/integrations";
 import { eq } from "drizzle-orm";
 import * as schema from "./db/schema";
-import { billingHandler } from "./routes/billing-handler";
 import { Client } from "@notionhq/client";
 
 export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
@@ -826,7 +825,6 @@ export default new OAuthProvider({
   apiHandlers: {
     "/sse": MyMCP.serveSSE("/sse"),
     "/mcp": MyMCP.serve("/mcp"),
-    "/billing": billingHandler as any,
   },
   authorizeEndpoint: "/authorize",
   clientRegistrationEndpoint: "/register",

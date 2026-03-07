@@ -17,7 +17,6 @@ import { createDbClient, type DbClient } from "../db/client";
 import { IntegrationService } from "../services/integrations";
 import { eq } from "drizzle-orm";
 import * as schema from "../db/schema";
-import { checkAccess, checkIntegrationAccess } from "../middleware/access";
 
 const app = new Hono<{ Bindings: Env & { OAUTH_PROVIDER: OAuthHelpers } }>();
 
@@ -30,36 +29,6 @@ async function handleDirectProviderAuth(c: any, provider: string) {
   let existingProps: Props | null = null;
 
   if (googleEmail) {
-    // Check subscription access BEFORE proceeding with auth
-    const accessCheck = await checkAccess(c.env, googleEmail);
-    if (!accessCheck.allowed) {
-      // Show upgrade page instead of auth
-      return c.html(`
-        <!DOCTYPE html>
-        <html>
-          <head>
-            <title>Subscription Required</title>
-            <style>
-              body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; background: #f9fafb; }
-              .card { background: white; padding: 3rem; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); text-align: center; max-width: 500px; }
-              h1 { color: #ef4444; margin-bottom: 1rem; font-size: 28px; }
-              .status { display: inline-block; padding: 8px 16px; background: #fee2e2; color: #991b1b; border-radius: 6px; margin-bottom: 1rem; font-weight: 600; }
-              p { color: #6b7280; margin-bottom: 1.5rem; line-height: 1.6; white-space: pre-line; }
-              a { display: inline-block; padding: 12px 24px; background: #0070f3; color: white; text-decoration: none; border-radius: 6px; font-weight: 600; margin-top: 0.5rem; }
-              a:hover { background: #0051cc; }
-            </style>
-          </head>
-          <body>
-            <div class="card">
-              <h1>🔒 Subscription Required</h1>
-              <div class="status">Status: ${accessCheck.status?.toUpperCase()}</div>
-              <p>${accessCheck.message}</p>
-              <a href="${c.env.SERVER_URL}/billing/checkout">View Plans & Subscribe</a>
-            </div>
-          </body>
-        </html>
-      `);
-    }
 
     try {
       // Check if D1 binding exists
@@ -145,38 +114,6 @@ async function handleDirectProviderAuth(c: any, provider: string) {
   } else {
     console.error("❌ No Google email in URL - cannot proceed with incremental auth");
     console.error("User must have authenticated with Google first");
-  }
-
-  // Check integration access before proceeding with OAuth (for non-Google providers)
-  if (googleEmail && provider !== "google") {
-    const integrationCheck = await checkIntegrationAccess(c.env, googleEmail, provider);
-
-    if (!integrationCheck.allowed) {
-      // Show upgrade page instead of auth
-      return c.html(`
-        <!DOCTYPE html>
-        <html>
-          <head>
-            <title>Upgrade Required</title>
-            <style>
-              body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; background: #f9fafb; }
-              .card { background: white; padding: 3rem; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); text-align: center; max-width: 500px; }
-              h1 { color: #ef4444; margin-bottom: 1rem; font-size: 28px; }
-              p { color: #6b7280; margin-bottom: 1.5rem; line-height: 1.6; }
-              a { display: inline-block; padding: 12px 24px; background: #0070f3; color: white; text-decoration: none; border-radius: 6px; font-weight: 600; }
-              a:hover { background: #0051cc; }
-            </style>
-          </head>
-          <body>
-            <div class="card">
-              <h1>Upgrade Required</h1>
-              <p>${integrationCheck.message}</p>
-              <a href="${c.env.SERVER_URL}/billing/checkout">Upgrade Now</a>
-            </div>
-          </body>
-        </html>
-      `);
-    }
   }
 
   const stateData = {
