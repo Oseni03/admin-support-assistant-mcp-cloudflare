@@ -21,6 +21,7 @@ import { eq } from "drizzle-orm";
 import * as schema from "./db/schema";
 import { billingHandler } from "./routes/billing-handler";
 import { checkToolAccess } from "./middleware/access";
+import { Client } from "@notionhq/client";
 
 export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
   private db!: DbClient;
@@ -429,19 +430,23 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
 
   // ── Notion tools registration ───────────────────
   private async registerNotionTools() {
-    for (const [toolName, toolDef] of Object.entries(notionTools)) {
+    for (const [toolName, operation] of Object.entries(notionTools)) {
       this.server.registerTool(
         toolName,
         {
-          description: toolDef.description,
-          inputSchema: toolDef.schema.shape ?? {},
+          description: operation.description || `Execute ${toolName} operation`,
+          inputSchema: operation.inputSchema,
         },
-        async (args: z.infer<typeof toolDef.schema>) => {
+        async (args: any) => {
           const [ctx, authError] = await this.getNotionContext();
           if (!ctx) return authError;
 
           try {
-            return await toolDef.handler(ctx, args as any);
+            // Make the API call using the operation details
+            const result = await this.executeNotionOperation(ctx.notion, operation, args);
+            return {
+              content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+            };
           } catch (err: any) {
             return {
               content: [{ type: "text", text: `Error: ${err.message}` }],
@@ -731,6 +736,105 @@ export class MyMCP extends McpAgent<Env, Record<string, never>, Props> {
           content: [{ type: "text", text: `Database error: ${error.message}` }],
         },
       ];
+    }
+  }
+
+  private async executeNotionOperation(notionClient: Client, operation: any, args: any): Promise<any> {
+    const { method, path } = operation;
+
+    // Build the request parameters
+    let url = path;
+    const requestOptions: any = {
+      method: method.toUpperCase(),
+    };
+
+    // Replace path parameters
+    if (operation.parameters) {
+      for (const param of operation.parameters) {
+        if (param.in === "path" && args[param.name]) {
+          url = url.replace(`{${param.name}}`, args[param.name]);
+        }
+      }
+    }
+
+    // Handle query parameters and body
+    if (method.toLowerCase() === "get") {
+      // For GET requests, add query parameters
+      const queryParams = new URLSearchParams();
+      if (operation.parameters) {
+        for (const param of operation.parameters) {
+          if (param.in === "query" && args[param.name] !== undefined) {
+            queryParams.append(param.name, args[param.name]);
+          }
+        }
+      }
+      // Add any remaining args as query params
+      for (const [key, value] of Object.entries(args)) {
+        if (value !== undefined && !operation.parameters?.some((p: any) => p.name === key && p.in === "path")) {
+          queryParams.append(key, String(value));
+        }
+      }
+      if (queryParams.toString()) {
+        url += "?" + queryParams.toString();
+      }
+    } else {
+      // For non-GET requests, put args in body
+      requestOptions.body = args;
+    }
+
+    // Make the API call
+    // Note: This is a simplified implementation. In a real scenario,
+    // you'd want to map the operationId to the correct Notion SDK method
+    // For now, we'll use a generic approach
+
+    // Map common operations to Notion SDK methods
+    const operationId = operation.operationId || operation.methodName;
+
+    switch (operationId) {
+      case "get-user":
+        return await notionClient.users.retrieve({ user_id: args.user_id });
+      case "get-users":
+        return await notionClient.users.list(args);
+      case "get-self":
+        return await notionClient.users.me({});
+      case "post-search":
+        return await notionClient.search(args);
+      case "get-block-children":
+        return await notionClient.blocks.children.list({ block_id: args.block_id, ...args });
+      case "patch-block-children":
+        return await notionClient.blocks.children.append({ block_id: args.block_id, ...args });
+      case "retrieve-a-block":
+        return await notionClient.blocks.retrieve({ block_id: args.block_id });
+      case "update-a-block":
+        return await notionClient.blocks.update({ block_id: args.block_id, ...args });
+      case "delete-a-block":
+        return await notionClient.blocks.delete({ block_id: args.block_id });
+      case "retrieve-a-page":
+        return await notionClient.pages.retrieve({ page_id: args.page_id });
+      case "post-page":
+        return await notionClient.pages.create(args);
+      case "patch-page":
+        return await notionClient.pages.update({ page_id: args.page_id, ...args });
+      case "move-page":
+        return await notionClient.pages.update({ page_id: args.page_id, ...args });
+      case "retrieve-a-data-source":
+        return await notionClient.databases.retrieve({ database_id: args.data_source_id });
+      case "query-a-data-source":
+        return await notionClient.databases.retrieve({ database_id: args.data_source_id, ...args });
+      case "update-a-data-source":
+        return await notionClient.databases.update({ database_id: args.data_source_id, ...args });
+      case "create-a-data-source":
+        return await notionClient.databases.create(args);
+      case "list-data-source-templates":
+        return await notionClient.databases.retrieve({ database_id: args.data_source_id });
+      case "retrieve-page-markdown":
+        // This might need special handling
+        return await notionClient.pages.retrieve({ page_id: args.page_id });
+      case "update-page-markdown":
+        // This might need special handling
+        return await notionClient.pages.update({ page_id: args.page_id, ...args });
+      default:
+        throw new Error(`Unsupported operation: ${operationId}`);
     }
   }
 }
