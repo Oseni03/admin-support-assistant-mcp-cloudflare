@@ -1,6 +1,20 @@
-# Model Context Protocol (MCP) Server + Multi-Integration OAuth
+# Administrative Support Assistant (AI VA) - MCP Server
 
-This is a [Model Context Protocol (MCP)](https://modelcontextprotocol.io/introduction) server that supports remote MCP connections, with Google OAuth and multiple service integrations built-in.
+This is an AI-powered Virtual Assistant that manages your administrative tasks through a [Model Context Protocol (MCP)](https://modelcontextprotocol.io/introduction) server deployed on Cloudflare Workers. It integrates with Gmail, Google Calendar, Google Drive, Notion, and Slack to handle routine admin work, keeping you focused on building and selling.
+
+## What it does
+
+- Manages inbox and calendar, keeps your documents organized, and handles routine admin work so you stay focused on building and selling.
+- Typical workflows: triage emails, draft replies, schedule meetings, create and maintain SOPs, update task trackers, summarize meetings, and keep files tidy.
+
+## Key integrations (recommended stack)
+
+- **Email**: Gmail
+- **Calendar**: Google Calendar
+- **Docs & storage**: Google Drive
+- **Knowledge base / notes**: Notion, Google Drive
+- **Team communication**: Slack
+- **Tasks & projects**: Notion (tasks)
 
 You can deploy it to your own Cloudflare account, and after you create your OAuth client apps, you'll have a fully functional remote MCP server with access to Gmail, Google Calendar, Google Drive, Notion, and Slack. Users authenticate with their Google account and can incrementally add additional service integrations.
 
